@@ -1,0 +1,9 @@
+{
+  "request_id": "request-1",
+  "resume_after": 1,
+  "frames": [
+    {"id": 1, "event": "turn_state", "data": {"status": "running"}},
+    {"id": 2, "event": "message_completed", "data": {"message": {"id": "message-1", "role": "assistant", "kind": "text", "payload": {"content": "done"}, "sequence_no": 2, "created_at": "2026-08-13T12:00:00Z"}}},
+    {"id": 3, "event": "done", "data": {}}
+  ]
+}

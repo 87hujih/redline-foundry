@@ -1,0 +1,14 @@
+{
+  "document": {
+    "content_hash": "sha256:3c0dc2f2839ac2afe18e11f2d87c8799b3213c6c9906bd6bc872d1bf6af4b464",
+    "node_ids": [
+      "node_99fc623d88ab9efe98f09908eb6eef73",
+      "node_74f0f7e3e13228ea1818c4d7dc83fe70",
+      "node_986a630908cff545ed217c84e6871cc1",
+      "node_d58d604bf2c2c4ca8d9f10ebf620bfbf",
+      "node_d9c5520d5a3f6620ceca8cba62d5c4c1"
+    ],
+    "chunks": ["Hello world.", "Python pgvector."]
+  },
+  "patch_hash": "sha256:43ebf14305ea3668d9e0a0c7951bd42cac5b4b6ab6154ddbaa587848abd9861f"
+}

@@ -1,0 +1,347 @@
+{
+  "schema_version": "docreview.parity.capture/v1",
+  "implementation": "go",
+  "fixture_version": "v1",
+  "source_revision": "read-only-worktree-2026-08-14",
+  "capture_mode": "offline_fixture_and_static_contract",
+  "real_side_effects_executed": false,
+  "scenarios": [
+    {
+      "id": "http.route-table-and-status",
+      "category": "routing_http_status",
+      "verification": "fixed_fixture",
+      "observation": {
+        "routes": [
+          "DELETE /api/assistant/sessions/{id}",
+          "GET /api/agent/approvals",
+          "GET /api/agent/approvals/{id}",
+          "GET /api/agent/runs",
+          "GET /api/agent/runs/{id}",
+          "GET /api/assistant/capabilities",
+          "GET /api/assistant/sessions",
+          "GET /api/assistant/sessions/{id}",
+          "GET /api/files/{id}/download",
+          "GET /api/resources",
+          "GET /api/resources/{id}",
+          "GET /api/resources/{id}/export",
+          "GET /api/resources/{id}/search",
+          "GET /healthz",
+          "POST /api/agent/approvals/{id}/approve",
+          "POST /api/agent/approvals/{id}/reject",
+          "POST /api/assistant/conversations",
+          "POST /api/assistant/conversations/files",
+          "POST /api/assistant/conversations/stream",
+          "POST /api/assistant/sessions/{id}/files",
+          "POST /api/assistant/sessions/{id}/messages",
+          "POST /api/assistant/sessions/{id}/messages/stream"
+        ],
+        "probes": [
+          {"name": "health", "status": 200},
+          {"name": "allowed_preflight", "status": 204},
+          {"name": "disallowed_preflight", "status": 403},
+          {"name": "legacy_task_route", "status": 404},
+          {"name": "create_turn", "status": 201},
+          {"name": "append_turn", "status": 200},
+          {"name": "delete_session", "status": 204},
+          {"name": "upload_without_identity", "status": 401},
+          {"name": "upload_without_identity_adapter", "status": 503}
+        ]
+      },
+      "evidence": [
+        "apps/server/internal/server/router/router.go",
+        "apps/server/internal/server/handlers/assistant.go",
+        "apps/server/internal/server/router/router_test.go"
+      ]
+    },
+    {
+      "id": "json.public-dto",
+      "category": "json_dto",
+      "verification": "fixed_fixture",
+      "observation": {
+        "health": {"service": "server", "status": "ok"},
+        "message": {
+          "created_at": "2026-08-13T12:00:00Z",
+          "id": "message-1",
+          "kind": "text",
+          "payload": {"content": "done"},
+          "role": "assistant",
+          "sequence_no": 2
+        },
+        "run_summary": {
+          "completed_step_count": 1,
+          "created_at": "2026-08-12T12:00:00Z",
+          "current_step": "DecideNextAction",
+          "failed_step_count": 0,
+          "id": "77777777-7777-4777-8777-777777777777",
+          "objective": "Review policy",
+          "resource_id": "55555555-5555-4555-8555-555555555555",
+          "status": "running",
+          "step_count": 3,
+          "updated_at": "2026-08-12T12:00:00Z",
+          "workspace_id": "33333333-3333-4333-8333-333333333333"
+        },
+        "forbidden_run_fields": [
+          "attempts",
+          "context_manifests",
+          "input_json",
+          "outbox_events",
+          "output_json",
+          "state_json",
+          "trace_index"
+        ]
+      },
+      "evidence": [
+        "apps/server/internal/server/handlers/health.go",
+        "apps/server/internal/server/handlers/assistant.go",
+        "apps/server/internal/server/handlers/agent_runtime_query.go"
+      ]
+    },
+    {
+      "id": "errors.public-mapping",
+      "category": "error_codes",
+      "verification": "static_contract",
+      "observation": {
+        "invalid_resource_id": [400, "资源 ID 非法"],
+        "missing_resource": [404, "资源不存在"],
+        "missing_current_version": [409, "资源当前版本不存在，无法检索"],
+        "untrusted_run_query": [401, "Agent 查询身份不可信"],
+        "approval_forbidden": [403, "审批权限不足"],
+        "approval_conflict": [409, "审批状态冲突"],
+        "turn_runtime_unavailable": [503, "durable agent runtime is unavailable"],
+        "turn_internal": [500, "处理助手请求失败"],
+        "upload_missing_identity": [401, "durable identity is required"],
+        "upload_identity_adapter_missing": [503, "durable identity adapter is not configured"]
+      },
+      "evidence": [
+        "apps/server/internal/server/handlers/resources.go",
+        "apps/server/internal/server/handlers/typed_approval.go",
+        "apps/server/internal/server/handlers/assistant.go"
+      ]
+    },
+    {
+      "id": "sse.persisted-and-terminal-order",
+      "category": "sse_sequence",
+      "verification": "fixed_fixture",
+      "observation": {
+        "success": [
+          {"data": {"status": "running"}, "event": "turn_state", "id": 1},
+          {"data": {"message": {"id": "message-1"}}, "event": "message_completed", "id": 2},
+          {"data": {}, "event": "done", "id": 3}
+        ],
+        "waiting": [
+          {"data": {"status": "waiting_approval"}, "event": "turn_state", "id": 7},
+          {"data": {}, "event": "done", "id": 7}
+        ],
+        "persisted_failure": [
+          {
+            "data": {
+              "code": "assistant_internal_error",
+              "message": "持久化轮次结束，但没有可恢复的结果"
+            },
+            "event": "error",
+            "id": 9
+          },
+          {"data": {}, "event": "done", "id": 9}
+        ],
+        "pipeline_exception": [
+          {
+            "data": {
+              "code": "assistant_internal_error",
+              "message": "助手暂时不可用，请使用相同 request_id 重试。"
+            },
+            "event": "error",
+            "id": 4
+          }
+        ],
+        "replay_rule": "emit sequence > Last-Event-ID"
+      },
+      "evidence": [
+        "apps/server/internal/server/handlers/assistant.go",
+        "apps/server/internal/agent/turn/coordinator.go"
+      ]
+    },
+    {
+      "id": "orchestration.decision-tool-intent",
+      "category": "decision_tool_intent",
+      "verification": "fixed_fixture",
+      "observation": {
+        "decision": {
+          "action": "retrieve_evidence",
+          "confidence": 0.9,
+          "expected_observation": "scoped EvidenceSet",
+          "reason": "Need current policy evidence",
+          "tool_input": {"query": "retention", "resource_id": "resource-1"},
+          "tool_name": "retrieval.search"
+        },
+        "validated_tool_intent": {
+          "next_node": "RetrieveEvidence",
+          "tool_input": {"query": "retention", "resource_id": "resource-1"},
+          "tool_name": "retrieval.search",
+          "tool_version": "2.0.0",
+          "wait_for_input": false
+        }
+      },
+      "evidence": [
+        "apps/server/internal/agent/orchestration/decision.go",
+        "apps/server/internal/agent/orchestration/validator.go",
+        "apps/server/internal/agent/tools/contracts.go"
+      ]
+    },
+    {
+      "id": "evidence.identity-citation-node",
+      "category": "evidence_citation_node_id",
+      "verification": "static_contract",
+      "observation": {
+        "evidence_set_id": "evset_59db0e135be6c28672153192f0ae2731",
+        "query_hash": "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "evidence_id": "ev_74c550ca13c61a41f90e835b826af3e0",
+        "resource_id": "resource-1",
+        "version_id": "version-1",
+        "node_id": "node-1",
+        "citation_id": "cite_1",
+        "provenance_id": "sha256:76c73b3dc07c0134d2aa72c43a77bead4af915e78ec11e1cda283f2960844d79",
+        "scope": ["workspace-1", "resource-1", "version-1"],
+        "required_full_fields": [
+          "content_hash",
+          "created_at",
+          "lexical_score",
+          "provenance",
+          "trust_level",
+          "vector_score"
+        ]
+      },
+      "evidence": [
+        "apps/server/internal/agent/evidence/contracts.go",
+        "apps/server/internal/agent/evidence/service.go",
+        "apps/server/internal/knowledge/citation/builder.go"
+      ]
+    },
+    {
+      "id": "document.patch-and-hash",
+      "category": "patch_hash",
+      "verification": "fixed_fixture",
+      "observation": {
+        "patch": {
+          "base_version_id": "version-1",
+          "evidence_refs": ["ev_1"],
+          "operations": [
+            {
+              "content": "updated",
+              "expected_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "node_id": "node_1",
+              "op": "replace_node"
+            }
+          ],
+          "reason": "golden",
+          "resource_id": "resource-1",
+          "schema_version": "1.0"
+        },
+        "patch_hash": "sha256:43ebf14305ea3668d9e0a0c7951bd42cac5b4b6ab6154ddbaa587848abd9861f",
+        "rejects": ["duplicate_key", "trailing_json", "unknown_field", "hash_conflict"]
+      },
+      "evidence": [
+        "apps/server/internal/document/patch/patch.go",
+        "apps/server/internal/document/patch/patch_test.go"
+      ]
+    },
+    {
+      "id": "runtime.fact-statuses",
+      "category": "run_step_attempt_status",
+      "verification": "static_contract",
+      "observation": {
+        "run": ["queued", "running", "waiting_input", "waiting_approval", "succeeded", "failed", "cancelled"],
+        "step": ["queued", "running", "waiting_input", "waiting_approval", "succeeded", "failed", "cancelled"],
+        "attempt_terminal_fields": ["finish_reason", "error_category", "completed_at"],
+        "tool": ["pending", "running", "succeeded", "failed", "cancelled"],
+        "outbox": ["pending", "publishing", "published", "dead_letter"]
+      },
+      "evidence": [
+        "apps/server/internal/agent/runtime/status.go",
+        "apps/server/internal/storage/postgres/migrations/017_durable_agent_runtime.sql"
+      ]
+    },
+    {
+      "id": "approval.bound-continuation",
+      "category": "approval_continuation",
+      "verification": "static_contract",
+      "observation": {
+        "approve": {
+          "approval": "approved",
+          "commit_step": {"step_key": "commit-patch:approval-1", "status": "queued", "type": "CommitPatch"},
+          "event": "agent.tool_approval.approved",
+          "run": "queued",
+          "same_decision": "replay",
+          "waiting_step": "succeeded"
+        },
+        "reject": {
+          "approval": "rejected",
+          "event": "agent.tool_approval.rejected",
+          "run": "failed",
+          "same_decision": "replay",
+          "waiting_step": "failed"
+        },
+        "opposite_decision": "conflict",
+        "bindings": ["workspace", "run", "step", "tool", "version", "patch_hash", "write_key", "resource_hash"]
+      },
+      "evidence": [
+        "apps/server/internal/agent/policy/postgres_approval_store.go",
+        "apps/server/internal/server/handlers/typed_approval.go"
+      ]
+    },
+    {
+      "id": "commit.transactional-outbox",
+      "category": "commit_outbox",
+      "verification": "static_contract",
+      "observation": {
+        "transaction": "serializable",
+        "facts": ["resource_version", "canonical_document", "nodes", "source_mappings", "patch_commit", "outbox"],
+        "event_type": "document.version.committed",
+        "idempotency_scope": ["workspace_id", "idempotency_key"],
+        "same_key_same_hash": "replay",
+        "same_key_different_hash": "conflict",
+        "failure": "rollback_all"
+      },
+      "evidence": [
+        "apps/server/internal/document/commit/committer.go",
+        "apps/server/internal/storage/postgres/documentcommit/repository.go"
+      ]
+    },
+    {
+      "id": "tenancy.workspace-isolation",
+      "category": "workspace_isolation",
+      "verification": "static_contract",
+      "observation": {
+        "trusted_source": "ingress_attestation",
+        "payload_cannot_override_scope": true,
+        "query_predicates": ["workspace_id", "resource_id", "version_id"],
+        "cross_workspace": ["not_found", "permission_denied"],
+        "commit_rechecks_scope": true,
+        "upload_requires_signed_scope": true
+      },
+      "evidence": [
+        "apps/server/internal/agent/identity/adapter.go",
+        "apps/server/internal/agent/policy/policy.go",
+        "apps/server/internal/server/handlers/assistant.go"
+      ]
+    },
+    {
+      "id": "recovery.retry-timeout-crash",
+      "category": "retry_timeout_crash_recovery",
+      "verification": "static_contract",
+      "observation": {
+        "retryable": ["rate_limited", "timeout", "retryable_upstream", "lease_expired"],
+        "backoff": "min(base*2^(attempt-1),max)",
+        "timeouts": ["tool_attempt", "attempt", "step", "run_deadline"],
+        "expired_step": ["close_attempt_as_lease_expired", "requeue_if_attempts_remain", "otherwise_fail"],
+        "stale_worker": "lease_generation_fenced",
+        "outbox_recovery": "publishing_to_pending_or_dead_letter",
+        "crash_after_side_effect": "same_tool_and_commit_idempotency_keys"
+      },
+      "evidence": [
+        "apps/server/internal/agent/runtime/engine.go",
+        "apps/server/internal/storage/postgres/agentrun/repository.go",
+        "docs/remediation/agent-runtime-cutover.md"
+      ]
+    }
+  ]
+}
