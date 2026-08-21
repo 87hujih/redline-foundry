@@ -66,7 +66,7 @@ def adapter() -> TrustedIngressAdapter:
     )
 
 
-def test_secret_minimum_matches_go_utf8_byte_length() -> None:
+def test_secret_minimum_matches_utf8_byte_length() -> None:
     value = TrustedIngressAdapter(
         secret="密" * 11,
         trust_source="edge-proxy",
@@ -76,7 +76,7 @@ def test_secret_minimum_matches_go_utf8_byte_length() -> None:
     assert value is not None
 
 
-def test_authenticates_go_canonical_tuple_and_normalizes_roles() -> None:
+def test_authenticates_canonical_tuple_and_normalizes_roles() -> None:
     scope = adapter().authenticate(
         IdentityRequest(
             method="GET",
@@ -163,7 +163,7 @@ def test_accepts_signed_service_principal_at_adapter_boundary() -> None:
     assert scope.principal.roles == ("worker",)
 
 
-def test_accepts_rfc3339nano_timestamp_used_in_go_signature() -> None:
+def test_accepts_rfc3339nano_timestamp_in_signature() -> None:
     issued_at = "2026-08-12T12:00:00.123456789Z"
     headers = signed_headers(issued_at=issued_at)
 

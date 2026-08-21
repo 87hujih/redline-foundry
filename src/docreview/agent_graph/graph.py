@@ -1,7 +1,7 @@
-"""Bounded LangGraph whose nodes emit commands instead of performing side effects.
+"""有界 LangGraph；节点只发出命令，不直接执行副作用。
 
-LangGraph 1.2 lacks complete Pyright stubs. This module isolates that dynamic
-construction surface; domain models and runtime payloads remain strictly typed.
+LangGraph 1.2 尚无完整 Pyright 存根。本模块隔离动态构造边界，领域模型和
+Runtime 载荷仍保持严格类型。
 """
 
 # pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false, reportUnknownArgumentType=false
@@ -49,7 +49,7 @@ class GraphLimits:
 
     def __post_init__(self) -> None:
         if self.max_cycles <= 0 or self.max_no_progress <= 0 or self.max_observations <= 0:
-            raise ValueError("graph limits must be positive")
+            raise ValueError("图 限制 必须为正数")
 
 
 class AgentGraphNodes:
@@ -87,7 +87,7 @@ class AgentGraphNodes:
         raw = interrupt(request.model_dump(mode="json"))
         response = RuntimeResponse.model_validate_json(json.dumps(raw))
         if response.request_id != request.request_id:
-            raise ValueError("runtime response request_id does not match interrupted request")
+            raise ValueError("运行时 响应 request_id 与预期不匹配 已中断 请求")
         return result_type.model_validate_json(json.dumps(response.data)), response.budget
 
     @staticmethod
@@ -109,7 +109,7 @@ class AgentGraphNodes:
         prior_hashes = {item.content_hash for item in state.observations}
         expected_novel = observation.content_hash not in prior_hashes
         if observation.novel is not expected_novel:
-            raise ValueError("observation novelty does not match bounded graph history")
+            raise ValueError("观察结果 新颖性 与预期不匹配 受限 图 历史记录")
         observations = (*state.observations, observation)[-self.limits.max_observations :]
         no_progress = 0 if expected_novel else state.consecutive_no_progress + 1
         return observations, no_progress
@@ -165,7 +165,7 @@ class AgentGraphNodes:
                 "sequence": state.sequence + 1,
             }
         if state.context_manifest_id is None:
-            raise ValueError("DecideNextAction requires a persisted context manifest")
+            raise ValueError("DecideNextAction 需要 已持久化的 上下文 清单")
         request = self._request(
             state,
             target=RuntimeTarget.MODEL_GATEWAY,
@@ -174,9 +174,19 @@ class AgentGraphNodes:
         )
         result, budget = self._resume(request, DecisionResult)
         assert isinstance(result, DecisionResult)
-        action = validate_action(state, result.decision)
+        decision = result.decision
+        if state.finding_refs and decision.action is ActionKind.ANALYZE:
+            decision = decision.model_copy(
+                update={
+                    "action": ActionKind.FINISH,
+                    "reason": "findings are ready for the final answer",
+                    "tool_name": "",
+                    "tool_input": {},
+                }
+            )
+        action = validate_action(state, decision)
         return {
-            "last_decision": result.decision,
+            "last_decision": decision,
             "last_action": action,
             "budget": budget,
             "current_node": action.next_node,
@@ -193,7 +203,7 @@ class AgentGraphNodes:
             or decision.action is not ActionKind.REQUEST_USER_INPUT
             or not action.waits_for_input
         ):
-            raise ValueError("AwaitUserInput requires a persisted user-input decision")
+            raise ValueError("AwaitUserInput 需要 已持久化的 用户-输入 决定")
         input_request = self._request(
             state,
             target=RuntimeTarget.RUNTIME,
@@ -224,7 +234,7 @@ class AgentGraphNodes:
             or action.kind is not expected
             or action.next_node is not state.current_node
         ):
-            raise ValueError("persisted action does not authorize this tool node")
+            raise ValueError("已持久化的 操作 未授权 此 工具 节点")
         request = self._request(
             state,
             target=RuntimeTarget.TOOL_RUNTIME,
@@ -256,7 +266,7 @@ class AgentGraphNodes:
 
     def analyze_evidence(self, state: GraphState) -> dict[str, Any]:
         if not state.observations:
-            raise ValueError("AnalyzeEvidence requires durable observations")
+            raise ValueError("AnalyzeEvidence 需要 持久化 观察结果")
         request = self._request(
             state,
             target=RuntimeTarget.MODEL_GATEWAY,
@@ -277,7 +287,7 @@ class AgentGraphNodes:
 
     def generate_patch(self, state: GraphState) -> dict[str, Any]:
         if not state.finding_refs:
-            raise ValueError("GeneratePatch requires typed finding references")
+            raise ValueError("GeneratePatch 需要 类型化 发现项 引用")
         request = self._request(
             state,
             target=RuntimeTarget.MODEL_GATEWAY,
@@ -287,7 +297,7 @@ class AgentGraphNodes:
         result, budget = self._resume(request, GeneratedPatchResult)
         assert isinstance(result, GeneratedPatchResult)
         if not result.reference.generated or result.reference.valid:
-            raise ValueError("generated Patch reference has an invalid state")
+            raise ValueError("已生成 Patch 引用 包含无效的 状态")
         observations, no_progress = self._record_observation(state, result.observation)
         return {
             "patch_ref": result.reference,
@@ -301,7 +311,7 @@ class AgentGraphNodes:
     def validate_patch(self, state: GraphState) -> dict[str, Any]:
         patch = state.patch_ref
         if patch is None or not patch.generated or patch.valid:
-            raise ValueError("ValidatePatch requires an unvalidated generated Patch reference")
+            raise ValueError("ValidatePatch 需要 未经校验 已生成 Patch 引用")
         request = self._request(
             state,
             target=RuntimeTarget.TOOL_RUNTIME,
@@ -318,7 +328,7 @@ class AgentGraphNodes:
             or result.reference.content_hash != patch.content_hash
             or result.reference.valid is not result.valid
         ):
-            raise ValueError("Patch validation response is not bound to the generated Patch")
+            raise ValueError("Patch 校验 响应 未绑定到 该 已生成 Patch")
         observations, no_progress = self._record_observation(state, result.observation)
         return {
             "patch_ref": result.reference,
@@ -334,7 +344,7 @@ class AgentGraphNodes:
     def request_approval(self, state: GraphState) -> dict[str, Any]:
         patch = state.patch_ref
         if patch is None or not patch.valid or patch.target_idempotency_key is None:
-            raise ValueError("RequestApproval requires a validated Patch and commit key")
+            raise ValueError("RequestApproval 需要 已校验 Patch 和 提交 键")
         create_request = self._request(
             state,
             target=RuntimeTarget.TOOL_RUNTIME,
@@ -351,7 +361,7 @@ class AgentGraphNodes:
         created, budget = self._resume(create_request, ApprovalRequestResult)
         assert isinstance(created, ApprovalRequestResult)
         if created.approval.status != "pending":
-            raise ValueError("approval ToolRuntime must return a pending approval fact")
+            raise ValueError("审批 工具运行时 必须返回 待处理 审批 事实")
         observations, no_progress = self._record_observation(state, created.observation)
         return {
             "approval_ref": created.approval,
@@ -366,9 +376,9 @@ class AgentGraphNodes:
         patch = state.patch_ref
         approval = state.approval_ref
         if patch is None or not patch.valid or patch.target_idempotency_key is None:
-            raise ValueError("AwaitApproval requires a validated Patch and commit key")
+            raise ValueError("AwaitApproval 需要 已校验 Patch 和 提交 键")
         if approval is None or approval.status != "pending":
-            raise ValueError("AwaitApproval requires a pending approval fact")
+            raise ValueError("AwaitApproval 需要 待处理 审批 事实")
         wait_request = self._request(
             state,
             target=RuntimeTarget.RUNTIME,
@@ -388,7 +398,7 @@ class AgentGraphNodes:
             or decided.approval.fact_id != approval.fact_id
             or decided.approval.status not in {"approved", "rejected"}
         ):
-            raise ValueError("approval decision does not match the interrupted approval fact")
+            raise ValueError("审批 决定 与预期不匹配 该 已中断 审批 事实")
         if decided.approval.status == "approved":
             return {
                 "approval_ref": decided.approval,
@@ -414,7 +424,7 @@ class AgentGraphNodes:
             or approval is None
             or approval.status != "approved"
         ):
-            raise ValueError("CommitPatch requires the bound validated Patch and approval fact")
+            raise ValueError("CommitPatch 需要已绑定且校验通过的补丁和审批事实")
         request = self._request(
             state,
             target=RuntimeTarget.COMMITTER,
@@ -430,7 +440,7 @@ class AgentGraphNodes:
         result, budget = self._resume(request, CommitResult)
         assert isinstance(result, CommitResult)
         if result.commit.resource_id != patch.resource_id:
-            raise ValueError("commit result resource does not match the approved Patch")
+            raise ValueError("提交 结果 资源 与预期不匹配 该 已批准 Patch")
         observations, no_progress = self._record_observation(state, result.observation)
         return {
             "commit_ref": result.commit,

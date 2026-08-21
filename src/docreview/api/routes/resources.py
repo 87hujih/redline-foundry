@@ -1,4 +1,4 @@
-"""Go-compatible read-only resource endpoints."""
+"""资源端点。"""
 
 from __future__ import annotations
 
@@ -11,15 +11,10 @@ from fastapi.responses import Response
 
 from docreview.api.dependencies import AppDependencies
 from docreview.api.errors import APIError
+from docreview.api.trusted_scope import trusted_workspace_scope
 from docreview.storage.models import Citation, Resource, ResourceVersion
 
 router = APIRouter(prefix="/api/resources")
-
-
-def _workspace(dependencies: AppDependencies) -> str:
-    if dependencies.compatibility_scope is None:
-        raise APIError(500, "资源存储未配置")
-    return dependencies.compatibility_scope.workspace_id
 
 
 def _uuid(value: str) -> str:
@@ -104,9 +99,9 @@ async def _current(
 @router.get("")
 async def list_resources(request: Request) -> dict[str, object]:
     dependencies = _deps(request)
+    workspace_id = trusted_workspace_scope(request, dependencies).workspace_id
     if dependencies.resources is None:
         raise APIError(500, "资源存储未配置")
-    workspace_id = _workspace(dependencies)
     try:
         values = await dependencies.resources.list(workspace_id)
     except Exception as error:
@@ -117,16 +112,33 @@ async def list_resources(request: Request) -> dict[str, object]:
 @router.get("/{resource_id}")
 async def get_resource(resource_id: str, request: Request) -> dict[str, object]:
     dependencies = _deps(request)
+    workspace_id = trusted_workspace_scope(request, dependencies).workspace_id
     if dependencies.resources is None:
         raise APIError(500, "资源存储未配置")
     resource_id = _uuid(resource_id)
-    workspace_id = _workspace(dependencies)
     value = await _find(dependencies, workspace_id, resource_id)
     current = await _current(dependencies, workspace_id, resource_id)
     return {
         "resource": _resource(value),
         "current_version": None if current is None else _version(current),
     }
+
+
+@router.delete("/{resource_id}")
+async def delete_resource(resource_id: str, request: Request) -> Response:
+    dependencies = _deps(request)
+    workspace_id = trusted_workspace_scope(request, dependencies).workspace_id
+    repository = dependencies.resources
+    if repository is None:
+        raise APIError(500, "资源存储未配置")
+    resource_id = _uuid(resource_id)
+    try:
+        deleted = await repository.delete(workspace_id, resource_id)
+    except Exception as error:
+        raise APIError(500, "删除资源失败") from error
+    if not deleted:
+        raise APIError(404, "资源不存在")
+    return Response(status_code=204)
 
 
 def _export_filename(value: Resource) -> str:
@@ -140,10 +152,10 @@ def _export_filename(value: Resource) -> str:
 @router.get("/{resource_id}/export")
 async def export_resource(resource_id: str, request: Request) -> Response:
     dependencies = _deps(request)
+    workspace_id = trusted_workspace_scope(request, dependencies).workspace_id
     if dependencies.resources is None:
         raise APIError(500, "资源存储未配置")
     resource_id = _uuid(resource_id)
-    workspace_id = _workspace(dependencies)
     value = await _find(dependencies, workspace_id, resource_id)
     current = await _current(dependencies, workspace_id, resource_id)
     if current is None:
@@ -157,14 +169,14 @@ async def export_resource(resource_id: str, request: Request) -> Response:
 
 @router.get("/{resource_id}/search")
 async def search_resource(resource_id: str, request: Request, q: str = "") -> dict[str, Any]:
+    dependencies = _deps(request)
+    workspace_id = trusted_workspace_scope(request, dependencies).workspace_id
     query = q.strip()
     if not query:
         raise APIError(400, "查询参数 q 不能为空")
-    dependencies = _deps(request)
     if dependencies.resources is None:
         raise APIError(500, "资源存储未配置")
     resource_id = _uuid(resource_id)
-    workspace_id = _workspace(dependencies)
     await _find(dependencies, workspace_id, resource_id)
     if await _current(dependencies, workspace_id, resource_id) is None:
         raise APIError(409, "资源当前版本不存在，无法检索")  # noqa: RUF001

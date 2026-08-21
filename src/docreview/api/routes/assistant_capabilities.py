@@ -1,4 +1,4 @@
-"""Assistant upload capability compatibility endpoint."""
+"""Assistant 上传能力兼容端点。"""
 
 from __future__ import annotations
 

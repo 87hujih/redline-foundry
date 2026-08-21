@@ -1,4 +1,4 @@
-"""Offline LangGraph orchestration for the active Supervisor closure."""
+"""当前 Supervisor 闭环的离线 LangGraph 编排。"""
 
 from docreview.agent_graph.boundary import ProjectRuntimeBoundary
 from docreview.agent_graph.checkpoint import (

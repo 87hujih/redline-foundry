@@ -1,0 +1,2 @@
+{"case_id":"smoke-001","retrieved_node_ids":["node-penalty"],"citations":["node-penalty"],"answer":"违约金按合同金额的5%计算。","claims":["违约金按合同金额的5%计算"]}
+{"case_id":"smoke-002","retrieved_node_ids":["node-other"],"citations":["node-other"],"answer":"无法从证据确定合同期限。","claims":[]}

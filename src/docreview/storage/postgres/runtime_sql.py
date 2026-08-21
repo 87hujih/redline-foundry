@@ -1,4 +1,4 @@
-"""Frozen PostgreSQL statements for the durable Python runtime."""
+"""Python 持久化 Runtime 的冻结 PostgreSQL 语句。"""
 
 RUN_COLUMNS = """
 id::text, organization_id::text, workspace_id::text, session_id::text, request_id,
@@ -38,7 +38,9 @@ lease_generation, error_json, created_at, published_at
 
 APPROVAL_COLUMNS = """
 id::text, workspace_id::text, run_id::text, step_id::text, tool_name, tool_version,
-idempotency_key, resources_json, resources_hash, payload_json, reason, status, created_at
+idempotency_key, resources_json, resources_hash, payload_json, reason, status,
+requested_by_type, requested_by_id, COALESCE(decision_reason, ''),
+COALESCE(decided_by_type, ''), COALESCE(decided_by_id, ''), created_at, decided_at
 """
 
 CREATE_APPROVAL_SQL = f"""
@@ -54,6 +56,11 @@ RETURNING {APPROVAL_COLUMNS}
 GET_APPROVAL_SQL = f"""
 SELECT {APPROVAL_COLUMNS} FROM agent_tool_approvals
 WHERE workspace_id = %s AND run_id = %s AND idempotency_key = %s
+"""
+
+GET_APPROVAL_BY_ID_SQL = f"""
+SELECT {APPROVAL_COLUMNS} FROM agent_tool_approvals
+WHERE id = %s
 """
 
 DECIDE_APPROVAL_SQL = """
@@ -377,6 +384,11 @@ WHERE run_id = %s AND idempotency_key = %s
 FOR UPDATE
 """
 
+GET_TOOL_BY_ID_SQL = f"""
+SELECT {TOOL_COLUMNS} FROM tool_calls
+WHERE id = %s
+"""
+
 RECLAIM_TOOL_SQL = f"""
 UPDATE tool_calls
 SET status = 'running', claimed_by = %s, lease_expires_at = %s,
@@ -481,6 +493,7 @@ __all__ = [
     "FAIL_REJECTED_STEP_SQL",
     "FINISH_ATTEMPT_SQL",
     "FINISH_TOOL_SQL",
+    "GET_APPROVAL_BY_ID_SQL",
     "GET_APPROVAL_SQL",
     "GET_ATTEMPT_SQL",
     "GET_CONTEXT_MANIFEST_SQL",
@@ -488,6 +501,7 @@ __all__ = [
     "GET_RUN_BY_REQUEST_SQL",
     "GET_STEP_BY_KEY_SQL",
     "GET_STEP_INPUT_SQL",
+    "GET_TOOL_BY_ID_SQL",
     "HEARTBEAT_STEP_SQL",
     "LOAD_WORK_SQL",
     "LOCK_APPROVAL_SQL",

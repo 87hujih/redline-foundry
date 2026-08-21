@@ -1,4 +1,4 @@
-"""Durable PostgreSQL-backed agent runtime primitives."""
+"""由 PostgreSQL 支持的持久化 Agent Runtime 基础设施。"""
 
 from docreview.runtime.models import (
     Attempt,

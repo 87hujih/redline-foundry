@@ -1,8 +1,8 @@
-# Persistence Contract Freeze
+# 持久化契约冻结
 
 **证据时间：** 2026-08-12。Python 必须保留当前 PostgreSQL 表、约束、参数化 SQL 的可观察行为。Phase 0 不连接数据库、不运行 migration/DDL/backfill、不改写 SQL。迁移文件是只读事实来源；未来 Schema 变更必须另行批准并遵守 expand → dual write/backfill → verify → switch read → contract。
 
-## Durable aggregate
+## 持久化聚合
 
 ```text
 Workspace/Principal
@@ -10,104 +10,135 @@ Workspace/Principal
   -> Approval -> Commit -> Outbox -> Projection/Receipt
 ```
 
-Run/Step/Attempt/Tool/Approval/Commit/Outbox/Projection are facts. LangGraph state/checkpoint, in-memory wake channels, SSE connections and UI state are reconstructable projections and cannot become an alternate source of truth.
+Run/Step/Attempt/Tool/Approval/Commit/Outbox/Projection 都是事实。LangGraph state/checkpoint、
+内存唤醒 channel、SSE 连接和 UI state 都是可重建 projection，不能成为另一事实源。
 
-## Facts and immutable behavior
+## 事实与不可变行为
 
-| Fact | Current table/repository | State/identity contract | Python invariant |
+| 事实 | 当前表/repository | 状态/身份契约 | Python 不变量 |
 | --- | --- | --- | --- |
-| Run | `agent_runs`; `agentrun.Repository`, `EngineStore` | statuses `queued`, `running`, `waiting_input`, `waiting_approval`, `succeeded`, `failed`, `cancelled`; `(workspace_id, request_id)` unique; legacy/null workspace has partial global request unique index; positive budgets/version | Preserve status checks, current step, deadlines/cancel, state JSON object, optimistic version, and exact workspace/request lookup. |
-| Step | `agent_steps` | `(run_id, step_key)` unique; typed input/output/error objects; queued claim; running owner/expiry/heartbeat/generation; attempts/retry; completed only terminal | Claim one runnable step with DB lock; changed type/input/retry policy under same key is conflict. |
-| Attempt | `agent_attempts` | `(step_id, attempt_number)` unique; provider/model/prompt/temp/context/trace/usage/cost/latency/retry/finish/error telemetry | Persist start and terminal outcome; nonnegative counters; abandoned lease closes as `lease_expired`. |
-| Tool | `tool_calls`; `agenttools.Runtime`, `agentrun.ToolAuditStore` | status `pending/running/succeeded/failed/cancelled`; `(run_id,idempotency_key)` unique when set; tool/version/input/output/error/provenance/audit | Every model/tool call goes through versioned Registry + schema + Policy + rate limit + audit; same key/different facts conflicts. |
-| Observation | `agent_observations` | `(run_id, observation_key)` unique; payload object, hash, `novel`; optional tool call | Store full bounded result durably; GraphState keeps only references; repeated hash increments no-progress. |
-| Context | `context_manifests` | immutable ordered items, tokenizer, total/reserved/budget and hash; `(run_id,step_id)` lookup | Re-load exact manifest by ID; never rebuild from current retrieval/document. |
-| Approval | `agent_tool_approvals`; `agentpolicy.ApprovalStore` | pending/approved/rejected/cancelled; bound workspace/run/request-step/tool/version/write key/resource hash; owner/admin external decision | Request creates pending only. Approve atomically creates exact CommitPatch continuation and queues run; reject terminally fails with `policy_blocked`; repeat same decision replays, opposite conflicts. |
-| Commit | `document_patch_commits`; `documentcommit.Committer` + PostgreSQL adapter | `(workspace_id,idempotency_key)` unique; Patch hash/base/new version/outbox/actor binding | Serializable lock/recheck, validate AST/expected hashes/scope/evidence, insert full version bundle + one outbox event atomically; same key/hash returns prior IDs. |
-| Outbox | `outbox_events`; `outbox.Repository`, `ProjectionWorker` | `pending/publishing/published/dead_letter`; aggregate/idempotency unique; claim owner/expiry/generation; bounded retry | Event intent is inserted in the writer transaction; publication is retryable and lease fenced; no manual key replacement. |
-| Projection | `agent_turn_public_projections`, `outbox_projection_receipts`; `RuntimeProjector` | terminal/waiting public states only; DTO/content hash/last event sequence; `(event_id,projection_name)` receipt unique | Projection reads facts, preserves sequence, writes receipt idempotently, and never exposes raw state/manifest/tool payloads. |
+| Run | `agent_runs`; `agentrun.Repository`, `EngineStore` | status `queued`、`running`、`waiting_input`、`waiting_approval`、`succeeded`、`failed`、`cancelled`；`(workspace_id, request_id)` 唯一；legacy/null workspace 使用 partial global request unique index；正预算/version | 保留 status 校验、current step、deadline/cancel、state JSON object、optimistic version 与精确 workspace/request 查询。 |
+| Step | `agent_steps` | `(run_id, step_key)` 唯一；类型化 input/output/error object；queued claim；running owner/expiry/heartbeat/generation；attempt/retry；completed 仅为 terminal | 用 DB lock claim 一个可运行 Step；同 key 下 type/input/retry policy 变化即 conflict。 |
+| Attempt | `agent_attempts` | `(step_id, attempt_number)` 唯一；provider/model/prompt/temp/context/trace/usage/cost/latency/retry/finish/error telemetry | 持久化 start 与 terminal outcome；counter 非负；遗弃 lease 关闭为 `lease_expired`。 |
+| Tool | `tool_calls`; `agenttools.Runtime`, `agentrun.ToolAuditStore` | status `pending/running/succeeded/failed/cancelled`；设置时 `(run_id,idempotency_key)` 唯一；tool/version/input/output/error/provenance/audit | 每个 model/tool call 都经过 versioned Registry + schema + Policy + rate limit + audit；同 key 不同事实产生 conflict。 |
+| Observation | `agent_observations` | `(run_id, observation_key)` 唯一；payload object、hash、`novel`；可选 Tool call | 持久化保存完整有界结果；GraphState 只保留 reference；重复 hash 增加 no-progress。 |
+| Context | `context_manifests` | 不可变有序 item、tokenizer、total/reserved/budget 与 hash；按 `(run_id,step_id)` 查询 | 按 ID 重新加载准确 manifest；绝不从当前 retrieval/document 重建。 |
+| Approval | `agent_tool_approvals`; `agentpolicy.ApprovalStore` | pending/approved/rejected/cancelled；绑定 workspace/run/request-step/tool/version/write key/resource hash；owner/admin external decision | Request 只创建 pending。Approve 原子创建准确 CommitPatch continuation 并排队 Run；reject 以 `policy_blocked` terminal failure；相同 decision replay，相反 decision conflict。 |
+| Commit | `document_patch_commits`; `documentcommit.Committer` + PostgreSQL adapter | `(workspace_id,idempotency_key)` 唯一；Patch hash/base/new version/outbox/actor binding | Serializable lock/recheck，校验 AST/expected hash/scope/evidence，原子插入完整 version bundle + 一个 outbox event；相同 key/hash 返回既有 ID。 |
+| Outbox | `outbox_events`; `outbox.Repository`, `ProjectionWorker` | `pending/publishing/published/dead_letter`；aggregate/idempotency 唯一；claim owner/expiry/generation；有界 retry | Event intent 在 writer transaction 中插入；publication 可 retry 且受 lease fencing；不手工替换 key。 |
+| Projection | `agent_turn_public_projections`, `outbox_projection_receipts`; `RuntimeProjector` | 仅 terminal/waiting public state；DTO/content hash/last event sequence；`(event_id,projection_name)` receipt 唯一 | Projection 读取事实、保留 sequence、幂等写 receipt，绝不暴露 raw state/manifest/tool payload。 |
 
-## State machines
+## 状态机
 
 ### Turn
 
-`accepted -> running -> waiting_input|waiting_approval|succeeded|failed|cancelled`; waiting states may resume to `running` or terminal. Terminal states do not transition. `agent_turn_outcomes` permits `running`, waiting and terminal outcome records; outcome transition is checked by `turn.CanTransition` before writing.
+`accepted -> running -> waiting_input|waiting_approval|succeeded|failed|cancelled`；waiting state 可恢复到
+`running` 或 terminal，terminal state 不再迁移。`agent_turn_outcomes` 允许 running、waiting、terminal
+outcome record，写入前由 `turn.CanTransition` 校验 transition。
 
-### Run and Step
+### Run 与 Step
 
-`queued -> running`; running may retry to queued with deterministic backoff, wait for input/approval, succeed, fail or cancel. Expired running lease requeues if attempts remain, otherwise fails. Waiting approval is resumed only by the bound external decision transaction. Cancellation is idempotent and wakes waiting steps. Run/Step status constraints and completion timestamps are database-enforced.
+`queued -> running`；running 可用确定性 backoff retry 到 queued，可等待 input/approval、succeed、fail 或 cancel。
+过期 running lease 在仍有 attempt 时 requeue，否则 fail。Waiting approval 只能由绑定的 external decision
+transaction 恢复。Cancellation 幂等并唤醒 waiting Step。Run/Step status constraint 与完成时间由数据库强制。
 
-### Tool and Outbox
+### Tool 与 Outbox
 
-Tool: `pending -> running -> succeeded|failed|cancelled`; expired running tool calls may be reclaimed by generation. Outbox: `pending -> publishing -> published|dead_letter`; expired publishing returns to pending. Only declared retryable categories (`rate_limited`, `timeout`, `retryable_upstream`, plus lease expiry at engine boundary) may retry.
+Tool：`pending -> running -> succeeded|failed|cancelled`；过期 running Tool call 可按 generation reclaim。
+Outbox：`pending -> publishing -> published|dead_letter`；过期 publishing 返回 pending。只有声明的可重试
+类别（`rate_limited`、`timeout`、`retryable_upstream`，以及 engine boundary 的 lease expiry）可以 retry。
 
-## Transaction boundaries
+## 事务边界
 
-1. **Turn acceptance (`agentturn.Repository.Accept`)**: canonical input JSON/hash and idempotency lookup; one transaction creates/reuses session, user message, `agent_turn`, linked `agent_run`, initial `UnderstandGoal` step, ordered turn events, and `agent.turn.accepted` outbox.
-2. **Turn outcome (`CommitOutcome`)**: insert idempotent outcome fact; lock session and turn; validate transition; append assistant/system messages and ordered events; update turn/public projection; insert `agent.turn.outcome_committed` outbox; commit or roll back as one unit.
-3. **Step outcome/retry**: existing `pgx.Tx` carries lease-fenced attempt/step/run updates and deterministic outbox insertion. Heartbeat and completion require exact owner, generation and unexpired lease.
-4. **Approval decision**: authenticated owner/admin decision locks the approval/run/step and atomically either creates the unique CommitPatch step plus approval outbox or writes rejected terminal state plus rejection outbox.
-5. **Canonical commit**: Serializable transaction locks workspace/idempotency, resource/current version, rechecks base version and every expected node hash, writes `resource_versions`, canonical document/nodes/source mappings, derived sections/chunks/profile metadata, `document_patch_commits`, and `document.version.committed` outbox.
-6. **Projection publication**: claim/publish/receipt updates are separate transactions from the original fact transaction; receipt and event identity make replay idempotent.
+1. **Turn acceptance (`agentturn.Repository.Accept`)**：计算规范 input JSON/hash 并查幂等；一个事务创建/复用
+   session、user message、`agent_turn`、关联 `agent_run`、初始 `UnderstandGoal` Step、有序 Turn event 与
+   `agent.turn.accepted` Outbox。
+2. **Turn outcome (`CommitOutcome`)**：插入幂等 outcome fact；锁 session/Turn；校验 transition；追加
+   Assistant/system message 与有序 event；更新 Turn/public projection；插入 `agent.turn.outcome_committed`
+   Outbox；作为一个单元 commit 或 rollback。
+3. **Step outcome/retry**：Psycopg transaction 承载带 lease fencing 的 attempt/Step/Run update 与确定性
+   Outbox insertion。Heartbeat/completion 要求精确 owner、generation 与未过期 lease。
+4. **Approval decision**：已认证 owner/admin decision 锁定 Approval/Run/Step，原子地创建唯一 CommitPatch
+   Step 与 Approval Outbox，或写入 rejected terminal state 与 rejection Outbox。
+5. **Canonical commit**：Serializable transaction 锁定 workspace/idempotency、resource/current version，
+   重新检查 base version 与每个 expected node hash，写入 `resource_versions`、规范 document/node/source mapping、
+   派生 section/chunk/profile metadata、`document_patch_commits` 与 `document.version.committed` Outbox。
+6. **Projection publication**：claim/publish/receipt update 与原始 fact transaction 分离；receipt 与 event identity
+   使 replay 幂等。
 
-## Claim, lease generation and stale-worker fencing
+## Claim、lease generation 与过期 worker fencing
 
-Step and Outbox claim use one SQL statement with `FOR UPDATE SKIP LOCKED`, setting owner, expiry, heartbeat/attempt and incrementing `lease_generation`. Tool call recovery uses the same owner/expiry/generation pattern. Heartbeat, retry, completion, approval resume and publication all require:
+Step/Outbox claim 使用一条带 `FOR UPDATE SKIP LOCKED` 的 SQL，设置 owner、expiry、heartbeat/attempt 并递增
+`lease_generation`。Tool call recovery 使用相同 owner/expiry/generation 模式。Heartbeat、retry、completion、
+Approval resume、publication 都要求：
 
 ```text
-status is the expected running/publishing state
+status 为预期的 running/publishing 状态
 AND claimed_by == worker_id
 AND lease_generation == claimed_generation
 AND lease_expires_at > now()
 ```
 
-An expired worker cannot overwrite a newer claimant. Startup/periodic recovery closes abandoned Attempts as `lease_expired`, requeues or fails Steps according to `max_attempts`, and returns expired Outbox publication to `pending`.
+过期 worker 不能覆盖更新的 claimant。启动/周期恢复会将遗弃 Attempt 关闭为 `lease_expired`，
+按 `max_attempts` 重新排队或失败 Step，并将过期的 Outbox 发布退回 `pending`。
 
-## Idempotency keys
+## 幂等 key
 
-- Turn acceptance: `(idempotency_scope, request_id)` where scope is workspace, organization, session, or global compatibility scope; scope is immutable after acceptance.
-- Run creation: `(workspace_id, request_id)`; null workspace uses a separate partial global unique index.
-- Step: `(run_id, step_key)`.
-- Attempt: `(step_id, attempt_number)`.
-- Tool: `(run_id, idempotency_key)`.
-- Approval request: `(workspace_id, run_id, idempotency_key)`; target write key is deliberately a different domain.
-- Patch commit: `(workspace_id, idempotency_key)`.
-- Outbox: `(aggregate_type, aggregate_id, idempotency_key)`.
-- Projection receipt: `(event_id, projection_name)`.
-- Operator action (retained Go baseline): `(workspace_id, request_id)`.
+- Turn acceptance：`(idempotency_scope, request_id)`，scope 可以是 workspace、organization、session 或 global compatibility scope；acceptance 后 scope 不可变。
+- Run creation：`(workspace_id, request_id)`；null workspace 使用独立的 partial global unique index。
+- Step：`(run_id, step_key)`。
+- Attempt：`(step_id, attempt_number)`。
+- Tool：`(run_id, idempotency_key)`。
+- Approval request：`(workspace_id, run_id, idempotency_key)`；target write key 刻意属于不同 domain。
+- Patch commit：`(workspace_id, idempotency_key)`。
+- Outbox：`(aggregate_type, aggregate_id, idempotency_key)`。
+- Projection receipt：`(event_id, projection_name)`。
+- Operator action：`(workspace_id, request_id)`。
 
-Identical replay returns the stored fact/result. Any changed canonical input, output, tool/version/input, Patch, approval decision or event payload under an existing key returns a conflict. Database uniqueness remains the concurrency guard.
+相同 replay 返回已存储的事实/结果。在既有 key 下，任何规范 input、output、tool/version/input、
+Patch、approval decision 或 event payload 的变化都会返回 conflict。数据库唯一性仍是并发保护。
 
-## Workspace, Resource and Principal isolation
+## Workspace、Resource 与 Principal 隔离
 
-Trusted ingress supplies Principal and exact Workspace; request payload/model output cannot supply or override them. Query handlers require signed user identity. Policy resolves active membership/role and Resource ownership. Every runtime repository query and both retrieval channels constrain workspace, resource and exact resolved version. Committer rechecks Workspace/Resource/current version/node authorization inside the transaction. Cross-Workspace targets appear as not-found/denied, never as another tenant's data. Historical nullable workspace columns and pre-profile embeddings remain compatibility facts; Python must not invent backfill or silently broaden scope.
+Trusted ingress 提供 Principal 与准确 Workspace；request payload/model output 不能提供或覆盖它们。Query handler
+要求签名 user identity。Policy 解析 active membership/role 与 Resource ownership。每个 Runtime repository query
+及两个 retrieval channel 都限制 workspace、resource 与准确 resolved version。Committer 在事务内重新检查
+Workspace/Resource/current version/node authorization。跨 Workspace target 只显示 not-found/denied，绝不显示
+其他租户数据。历史可空 workspace column 与 profile 前 embedding 是兼容事实；Python 不得臆造 backfill 或
+静默扩大 scope。
 
-## Current relevant tables and migrations
+## 当前相关表与 migration
 
-| Migration | Tables/columns relevant to active closure | Status in Phase 0 |
+| Migration | 与当前闭包相关的表/列 | Phase 0 状态 |
 | --- | --- | --- |
-| 001-005, 007-015 | `resources`, `resource_versions`, `resource_chunks`; `assistant_sessions`, `assistant_messages`; `uploaded_files`; grounded structures/sections/chunks; session context/runtime projections | Existing compatibility facts; read/write behavior used by active resource/assistant/upload paths must remain. |
-| 006/008-010 | Legacy `tasks`, `approvals`, `execution_jobs`, notifications and task suggestion idempotency | Not registered in current Router; retain Go, do not migrate into Python online closure. |
-| 016 | `users`, `organizations`, `workspaces`, `memberships`, `principal_audit_events`; nullable workspace columns on existing tables | Expand-only identity/tenancy facts; no Phase 0 database execution or backfill. |
-| 017 | `agent_runs`, `agent_steps`, `context_manifests`, `agent_attempts`, `tool_calls`, `outbox_events` | Durable runtime source of truth; SQL is frozen. |
-| 018 | `agent_turns`, `agent_turn_events`, `agent_turn_outcomes`; Turn/Outcome links on messages/runs | Turn request/outcome and SSE replay facts; SQL is frozen. |
-| 019 | Tool leases; `agent_artifacts`, `agent_tool_approvals`, rate-limit buckets | Tool/approval/artifact controls; SQL is frozen. |
-| 020 | `agent_observations`, `agent_shadow_comparisons` | Observation/evaluation facts; shadow is not a current request path. |
-| 021-022 | Canonical AST/nodes/source mappings/Patch commits; retrieval profiles/embedding metadata/indexes | Required by future typed backend; no migration/backfill/traffic switch in Phase 0. |
-| 023 | Turn/Run scope columns, public projections, projection receipts, cutover comparisons | Current durable projection contract; append-only. |
-| 024 | `agent_runtime_operator_actions` | Go operations audit baseline; Python does not replace in Phase 0. |
+| 001-005, 007-015 | `resources`、`resource_versions`、`resource_chunks`；`assistant_sessions`、`assistant_messages`；`uploaded_files`；grounded structure/section/chunk；session context/runtime projection | 既有兼容事实；当前 resource/Assistant/upload 路径使用的读写行为必须保留。 |
+| 006/008-010 | 历史 `tasks`、`approvals`、`execution_jobs`、notification 与 task suggestion 幂等 | 当前 FastAPI 应用未注册；不属于在线闭包。 |
+| 016 | `users`、`organizations`、`workspaces`、`memberships`、`principal_audit_events`；既有表中可空的 workspace 列 | 仅扩展的 identity/tenancy 事实；Phase 0 不执行数据库操作或 backfill。 |
+| 017 | `agent_runs`、`agent_steps`、`context_manifests`、`agent_attempts`、`tool_calls`、`outbox_events` | 持久化 Runtime 的事实源；SQL 已冻结。 |
+| 018 | `agent_turns`、`agent_turn_events`、`agent_turn_outcomes`；message/run 上的 Turn/Outcome 关联 | Turn request/outcome 与 SSE replay 事实；SQL 已冻结。 |
+| 019 | Tool lease；`agent_artifacts`、`agent_tool_approvals`、rate-limit bucket | Tool/Approval/artifact 控制；SQL 已冻结。 |
+| 020 | `agent_observations`、`agent_shadow_comparisons` | Observation/evaluation 事实；shadow 不是当前 request 路径。 |
+| 021-022 | Canonical AST/node/source mapping/Patch commit；retrieval profile/embedding metadata/index | 未来 typed backend 所需；Phase 0 不执行 migration/backfill/流量切换。 |
+| 023 | Turn/Run scope 列、公开 projection、projection receipt、cutover comparison | 当前持久化 projection 契约；仅追加。 |
+| 024 | `agent_runtime_operator_actions` | 运维审计事实；Phase 0 不执行数据库变更。 |
 
-Evidence: `apps/server/internal/storage/postgres/migrations/001_mvp_init.sql:7-107`, `004_assistant_sessions.sql:1-24`, `005_uploaded_files.sql:1-19`, `009_assistant_context_snapshots.sql:1-19`, `011_grounded_structured_document_rag_phase1.sql:1-120`, and migrations 016-024 line references above. Exact SQL statements and constraints are the compatibility oracle; Python must use parameterized SQL and preserve ordering, NULL behavior, `ON CONFLICT`, locks, partial indexes, cascade/set-null actions, and error classification.
+契约证据位于 `src/docreview/storage/postgres/` 的参数化 SQL、repository adapter，以及 `tests/storage/`
+的 SQL/事务测试。准确 SQL statement 与 constraint 是持久化契约；实现必须保留顺序、NULL 行为、
+`ON CONFLICT`、lock、partial index、cascade/set-null action 与 error classification。
 
-## SQL behavior that Python must not change
+## Python 不得改变的 SQL 行为
 
-- Do not replace `FOR UPDATE SKIP LOCKED` claims with process-local queues or ORM polling that changes lock/order semantics.
-- Do not remove owner, lease expiry, heartbeat or generation predicates from heartbeat/completion/retry/publication updates.
-- Do not widen queries and filter Workspace/Resource in memory; scope predicates belong in every SQL read and write boundary.
-- Do not change unique/idempotency conflict behavior, canonical JSON/hash calculation, sequence ordering, or `Last-Event-ID` replay.
-- Do not make nullable legacy workspace/profile fields non-null, rewrite existing migration files, or delete legacy facts in this rewrite phase.
-- Do not make projection, embedding, notification or external provider I/O part of the acceptance transaction unless the existing contract explicitly does so; Outbox remains the transactional handoff.
+- 不得用改变 lock/order 语义的进程内 queue 或 ORM polling 替换 `FOR UPDATE SKIP LOCKED` claim。
+- 不得从 heartbeat/completion/retry/publication update 移除 owner、lease expiry、heartbeat 或 generation predicate。
+- 不得放宽 query 后在内存中过滤 Workspace/Resource；scope predicate 必须位于每个 SQL read/write boundary。
+- 不得改变 unique/idempotency conflict 行为、canonical JSON/hash 计算、sequence order 或 `Last-Event-ID` replay。
+- 未经数据库变更审批，不得将可空历史 workspace/profile 字段改为非空，不得改写既有 migration file，
+  也不得删除历史事实。
+- 除非既有契约明确要求，不得把 projection、embedding、notification 或 external provider I/O 放入 acceptance 事务；
+  Outbox 仍是事务性交接点。
 
-## Database safety for later phases
+## 后续阶段的数据库安全
 
-No database connection is allowed in Phase 0. Later tests may connect only through the shared test fuse: `ALLOW_DB_TESTS=1`, process-only `TEST_DATABASE_URL`, database name ending `_test`, and exact approved host allowlist. Production `DATABASE_URL` and `.env` must never be fallback test inputs. Any missing condition requires a documented skip, not a connection attempt.
+Phase 0 不允许数据库连接。后续测试只有通过共享 test fuse 才能连接：`ALLOW_DB_TESTS=1`、
+仅进程环境的 `TEST_DATABASE_URL`、以 `_test` 结尾的数据库名以及准确的批准 host allowlist。
+生产 `DATABASE_URL` 和 `.env` 绝不能作为测试 fallback。任一条件缺失都必须记录 skip，不能尝试连接。

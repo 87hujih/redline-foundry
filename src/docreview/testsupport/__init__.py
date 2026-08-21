@@ -1,1 +1,1 @@
-"""Test-only safety helpers."""
+"""仅供测试使用的安全辅助函数。"""

@@ -1,4 +1,4 @@
-"""Commands crossing the durable runtime/repository boundary."""
+"""跨越持久化 Runtime/repository 边界的命令。"""
 
 from __future__ import annotations
 

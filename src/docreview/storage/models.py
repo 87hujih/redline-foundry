@@ -1,4 +1,4 @@
-"""Read-only storage models used by Phase 2 routes."""
+"""Phase 2 路由使用的只读存储模型。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Typed representations of durable runtime business facts."""
+"""持久化 Runtime 业务事实的类型化表示。"""
 
 from __future__ import annotations
 
@@ -201,6 +201,17 @@ class Approval:
     reason: str
     status: str
     created_at: datetime
+    requested_by_type: str | None = None
+    requested_by_id: str | None = None
+    decision_reason: str | None = None
+    decided_by_type: str | None = None
+    decided_by_id: str | None = None
+    decided_at: datetime | None = None
+    resource_id: str | None = None
+    patch_id: str | None = None
+    patch_hash: str | None = None
+    input_hash: str | None = None
+    continuation_step_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

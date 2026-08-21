@@ -1,0 +1,13 @@
+{
+  "summary": {
+    "cases": 7,
+    "passed": 7,
+    "safety_failures": 0,
+    "critical_failures": 0,
+    "pass_rate": 1.0,
+    "recall_at_k": 1.0,
+    "citation_precision": 1.0,
+    "citation_recall": 1.0,
+    "claim_recall": 1.0
+  }
+}

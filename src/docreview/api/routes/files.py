@@ -1,4 +1,4 @@
-"""Original uploaded file download endpoint."""
+"""原始上传文件下载端点。"""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 
 from docreview.api.dependencies import AppDependencies
 from docreview.api.errors import APIError
+from docreview.api.trusted_scope import trusted_workspace_scope
 from docreview.storage.postgres.errors import FileContentNotFoundError
 
 router = APIRouter(prefix="/api/files")
@@ -31,14 +32,10 @@ def _uuid(value: str) -> str:
 @router.get("/{file_id}/download")
 async def download_file(file_id: str, request: Request) -> StreamingResponse:
     dependencies: AppDependencies = request.app.state.dependencies
-    if (
-        dependencies.uploaded_files is None
-        or dependencies.file_store is None
-        or dependencies.compatibility_scope is None
-    ):
+    workspace_id = trusted_workspace_scope(request, dependencies).workspace_id
+    if dependencies.uploaded_files is None or dependencies.file_store is None:
         raise APIError(500, "文件下载服务未配置")
     file_id = _uuid(file_id)
-    workspace_id = dependencies.compatibility_scope.workspace_id
     try:
         value = await dependencies.uploaded_files.get_by_id(workspace_id, file_id)
     except Exception as error:

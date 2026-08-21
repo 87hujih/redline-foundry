@@ -1,4 +1,4 @@
-"""Membership, role, and resource ownership policy boundary."""
+"""成员关系、角色与资源所有权 Policy 边界。"""
 
 from __future__ import annotations
 

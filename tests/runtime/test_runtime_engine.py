@@ -131,6 +131,12 @@ class FakeExecutor:
         return self.result
 
 
+class FailingExecutor:
+    async def execute(self, input: ExecutionInput) -> ExecutionResult:
+        del input
+        raise ValueError("invalid model action")
+
+
 def engine(
     store: FakeStore, executor: FakeExecutor, clock: FakeClock | None = None
 ) -> RuntimeEngine:
@@ -236,5 +242,22 @@ async def test_invalid_executor_telemetry_is_persisted_as_invalid_input() -> Non
 
     assert store.finished[0].input_tokens == 0
     assert store.finished[0].error_category == ErrorCategory.INVALID_INPUT.value
+    assert store.outcomes[0].error is not None
+    assert store.outcomes[0].error.category is ErrorCategory.INVALID_INPUT
+
+
+@pytest.mark.asyncio
+async def test_executor_validation_failure_is_persisted_without_stopping_worker() -> None:
+    store = FakeStore(work())
+    runtime = RuntimeEngine(
+        engine(store, FakeExecutor(ExecutionResult())).config,
+        store,
+        FailingExecutor(),
+        FakeClock(),
+    )
+
+    assert await runtime.process_one() is True
+    assert store.finished[0].error_category == ErrorCategory.INVALID_INPUT.value
+    assert store.outcomes[0].run_status is RunStatus.FAILED
     assert store.outcomes[0].error is not None
     assert store.outcomes[0].error.category is ErrorCategory.INVALID_INPUT

@@ -1,4 +1,4 @@
-"""Stable durable-runtime failure categories and repository errors."""
+"""稳定的持久化 Runtime 失败分类与 repository 错误。"""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ class ExecutionFailure:
 
     def __post_init__(self) -> None:
         if not self.message.strip():
-            raise ValueError("execution failure message is required")
+            raise ValueError("执行 失败 消息 为必填项")
 
     def as_json(self) -> dict[str, str]:
         value = {"category": self.category.value, "message": self.message}

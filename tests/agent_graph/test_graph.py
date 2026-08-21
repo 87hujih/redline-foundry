@@ -150,6 +150,49 @@ def test_graph_stops_before_decision_model_on_no_progress() -> None:
         },
     )
     assert result["stop_reason"] == "no_new_information"
+
+
+def test_graph_finishes_when_model_repeats_analyze_after_findings() -> None:
+    state = GraphState.model_validate(
+        initial_state(findings=True).model_dump(mode="json")
+        | {
+            "current_node": "DecideNextAction",
+            "goal": {"objective": "summarize", "constraints": [], "expected_output": "answer"},
+            "context_manifest_id": "manifest-1",
+        }
+    )
+    graph = build_graph(checkpointer=ProjectCheckpointer(InMemoryCheckpointRepository()))
+    result = resume_until(
+        graph,
+        state,
+        {
+            "decide_next_action": {
+                "budget": budget(),
+                "data": {
+                    "decision": {
+                        "action": "analyze",
+                        "reason": "analyze again",
+                        "tool_input": {},
+                        "expected_observation": "more analysis",
+                        "confidence": 0.8,
+                    }
+                },
+            },
+            "render_outcome": {
+                "budget": budget(),
+                "data": {
+                    "outcome": {
+                        "fact_id": "outcome-fact",
+                        "artifact_id": "outcome-artifact",
+                        "content_hash": "sha256:" + "4" * 64,
+                    }
+                },
+            },
+        },
+    )
+
+    assert result["current_node"] == "End"
+    assert result["last_decision"]["action"] == ActionKind.FINISH
     assert result["outcome_ref"].artifact_id == "outcome-artifact"
 
 

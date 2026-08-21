@@ -1,4 +1,4 @@
-"""Canonical JSON helpers shared by idempotent runtime boundaries."""
+"""幂等 Runtime 边界共享的规范 JSON 辅助函数。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from docreview.runtime.models import JSONObject
 
 def require_object(value: object, field: str) -> JSONObject:
     if not isinstance(value, dict):
-        raise ValueError(f"{field} must be a JSON object")
+        raise ValueError(f"{field}必须是 JSON 对象")
     typed = cast(dict[object, Any], value)
     return {str(key): item for key, item in typed.items()}
 

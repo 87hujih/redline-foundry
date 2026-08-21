@@ -1,4 +1,4 @@
-"""Workspace-scoped compatibility search used by resource search routes."""
+"""资源搜索路由使用的 Workspace-scoped 兼容搜索。"""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ class LegacySearchService:
         if grounded is not None:
             return grounded
         if self._embedder is None or self._reranker is None:
-            raise RuntimeError("retrieval providers are not configured")
+            raise RuntimeError("检索 提供方 不是 已配置的")
         vector = await self._embedder.embed(query.strip())
         if vector is None:
             return []

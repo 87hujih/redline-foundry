@@ -1,4 +1,4 @@
-"""Online assistant document upload adapters."""
+"""在线 Assistant 文档上传适配器。"""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ async def _content(
             supported = ",".join(value for value in extensions if value.strip())
             raise APIError(
                 400,
-                f"不支持的文件格式：{suffix or '(no extension)'}。当前支持：{supported}。",  # noqa: RUF001
+                f"不支持的文件格式：{suffix or '(无扩展名)'}。当前支持：{supported}。",  # noqa: RUF001
             )
     if not content:
         raise APIError(400, "文件内容不能为空")
@@ -105,7 +105,11 @@ async def upload_conversation_file(
 ) -> dict[str, object]:
     scope = _trusted_scope(request)
     dependencies: AppDependencies = request.app.state.dependencies
-    filename, content = await _content(request, extensions=dependencies.upload_policy_extensions)
+    filename, content = await _content(
+        request,
+        max_bytes=dependencies.upload_max_bytes or 20 * 1024 * 1024,
+        extensions=dependencies.upload_policy_extensions,
+    )
     try:
         return await _uploader(request).upload_conversation(
             scope.workspace_id,
@@ -130,7 +134,11 @@ async def upload_session_file(session_id: str, request: Request) -> dict[str, ob
         UUID(session_id.strip())
     except ValueError as error:
         raise APIError(400, "会话 ID 非法") from error
-    filename, content = await _content(request, extensions=dependencies.upload_policy_extensions)
+    filename, content = await _content(
+        request,
+        max_bytes=dependencies.upload_max_bytes or 20 * 1024 * 1024,
+        extensions=dependencies.upload_policy_extensions,
+    )
     try:
         return await _uploader(request).upload_session(
             scope.workspace_id,

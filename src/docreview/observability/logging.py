@@ -1,4 +1,4 @@
-"""Small JSON logging setup without third-party logging dependencies."""
+"""不依赖第三方日志库的轻量 JSON 日志设置。"""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ def configure_json_logging(*, level: str = "INFO", stream: TextIO | None = None)
 
 
 def log_context(**values: object) -> Mapping[str, object]:
-    """Return a typed mapping for callers constructing structured log extras."""
+    """为构造结构化日志扩展字段的调用方返回类型化 mapping。"""
 
     return values
 

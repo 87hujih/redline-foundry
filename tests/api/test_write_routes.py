@@ -25,7 +25,7 @@ PRINCIPAL_ID = "44444444-4444-4444-8444-444444444444"
 ORGANIZATION_ID = "55555555-5555-4555-8555-555555555555"
 
 
-def signed(path: str) -> dict[str, str]:
+def signed(path: str, method: str = "POST") -> dict[str, str]:
     issued_at = "2026-08-13T12:00:00Z"
     request_id = "approval-request"
     roles = "owner"
@@ -33,7 +33,7 @@ def signed(path: str) -> dict[str, str]:
         (
             "v1",
             request_id,
-            "POST",
+            method,
             path,
             "user",
             PRINCIPAL_ID,
@@ -116,10 +116,13 @@ async def test_delete_session_is_workspace_scoped_and_uses_frozen_statuses() -> 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=make_app(writer=writer)), base_url="http://test"
     ) as client:
-        deleted = await client.delete(f"/api/assistant/sessions/{SESSION_ID}")
+        path = f"/api/assistant/sessions/{SESSION_ID}"
+        headers = signed(path, "DELETE")
+        deleted = await client.delete(path, headers=headers)
         writer.deleted = False
-        missing = await client.delete(f"/api/assistant/sessions/{SESSION_ID}")
-        invalid = await client.delete("/api/assistant/sessions/bad")
+        missing = await client.delete(path, headers=headers)
+        invalid_path = "/api/assistant/sessions/bad"
+        invalid = await client.delete(invalid_path, headers=signed(invalid_path, "DELETE"))
 
     assert deleted.status_code == 204 and deleted.content == b""
     assert missing.status_code == 404 and missing.json() == {"error": "会话不存在"}

@@ -1,8 +1,7 @@
-"""Runtime-owned driver for the side-effect-free LangGraph command protocol."""
+"""由 Runtime 持有的无副作用 LangGraph 命令协议驱动器。"""
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
@@ -11,18 +10,18 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import CheckpointTuple
 from langgraph.types import Command
 
-from docreview.agent_graph.checkpoint import ProjectCheckpointer
+from docreview.agent_graph.checkpoint import AsyncProjectCheckpointer, ProjectCheckpointer
 from docreview.agent_graph.graph import build_graph
 from docreview.agent_graph.models import GraphResume, GraphState, RuntimeRequest, RuntimeResponse
 from docreview.runtime.models import ExecutionInput, ExecutionResult, Outcome, StepSpec
 
 
 class GraphLike(Protocol):
-    def invoke(self, input: object, config: RunnableConfig) -> object: ...
+    async def ainvoke(self, input: object, config: RunnableConfig) -> object: ...
 
 
 class RuntimeBoundary(Protocol):
-    """Project Runtime dispatches the request to its authoritative subsystem."""
+    """Project Runtime 将请求分派到权威子系统。"""
 
     async def dispatch(self, request: RuntimeRequest) -> RuntimeResponse: ...
 
@@ -35,16 +34,16 @@ class GraphRun:
 
 
 class LangGraphExecutor:
-    """Adapts one durable Step to a bounded graph invocation.
+    """将一个持久化 Step 适配为有界 Graph 调用。
 
-    The executor only dispatches graph-emitted commands through ``RuntimeBoundary``.
-    It never imports a provider, repository, parser, ToolRuntime or Committer.
+    Executor 只通过 ``RuntimeBoundary`` 分派 Graph 发出的命令，绝不导入
+    provider、repository、parser、ToolRuntime 或 Committer。
     """
 
     def __init__(
         self,
         graph: GraphLike,
-        checkpointer: ProjectCheckpointer,
+        checkpointer: ProjectCheckpointer | AsyncProjectCheckpointer,
         boundary: RuntimeBoundary,
     ) -> None:
         self.graph = graph
@@ -54,7 +53,7 @@ class LangGraphExecutor:
     @classmethod
     def create(
         cls,
-        checkpointer: ProjectCheckpointer,
+        checkpointer: ProjectCheckpointer | AsyncProjectCheckpointer,
         boundary: RuntimeBoundary,
     ) -> LangGraphExecutor:
         graph = cast(GraphLike, build_graph(checkpointer=checkpointer))
@@ -85,12 +84,11 @@ class LangGraphExecutor:
         existing = await self.checkpointer.aget_tuple(config)
         if existing is not None:
             return self._checkpoint_result(existing)
-        raw = await asyncio.to_thread(self.graph.invoke, state.model_dump(mode="json"), config)
+        raw = await self.graph.ainvoke(state.model_dump(mode="json"), config)
         return self._result(raw)
 
     async def resume(self, run_id: str, response: RuntimeResponse, namespace: str = "") -> GraphRun:
-        raw = await asyncio.to_thread(
-            self.graph.invoke,
+        raw = await self.graph.ainvoke(
             Command(resume=response.model_dump(mode="json")),
             self._config(run_id, namespace),
         )
@@ -110,7 +108,7 @@ class LangGraphExecutor:
             namespace = f"step:{input.step_id}"
             run = await self.start(state, namespace)
         while run.interrupts:
-            request = run.interrupts[0]
+            request = run.interrupts[0].model_copy(update={"step_id": input.step_id})
             if request.target.value == "runtime" and request.operation in {
                 "await_approval",
                 "await_user_input",
@@ -138,7 +136,7 @@ class LangGraphExecutor:
             response = await self.boundary.dispatch(request)
             run = await self.resume(input.run_id, response, namespace)
         if run.state is None:
-            raise RuntimeError("graph completed without a state")
+            raise RuntimeError("图 完成时缺少 状态")
         if run.state.outcome_ref is not None:
             result = ExecutionResult(
                 outcome=Outcome.SUCCEED,
@@ -175,7 +173,7 @@ class LangGraphExecutor:
     @staticmethod
     def _result(raw: object) -> GraphRun:
         if not isinstance(raw, dict):
-            raise RuntimeError("LangGraph returned a non-object result")
+            raise RuntimeError("LangGraph 返回的结果不是对象")
         typed_raw = cast(dict[str, Any], raw)
         interrupts = LangGraphExecutor._interrupts(typed_raw.get("__interrupt__"))
         state_value = {key: value for key, value in typed_raw.items() if key != "__interrupt__"}
@@ -215,14 +213,14 @@ class LangGraphExecutor:
     @staticmethod
     def _execution_result(value: object) -> ExecutionResult:
         if not isinstance(value, dict):
-            raise ValueError("stored graph Step result must be an object")
+            raise ValueError("已存储的 图 步骤 结果 必须是对象")
         typed = cast(dict[str, Any], value)
         next_steps_value = typed.get("next_steps")
         if not isinstance(next_steps_value, list):
-            raise ValueError("stored graph Step result next_steps must be an array")
+            raise ValueError("已存储的 图 步骤 结果 next_steps 必须是数组")
         output = typed.get("output")
         if not isinstance(output, dict):
-            raise ValueError("stored graph Step result output must be an object")
+            raise ValueError("已存储的 图 步骤 结果 输出 必须是对象")
         return ExecutionResult(
             outcome=Outcome(str(typed.get("outcome", ""))),
             output=cast(dict[str, Any], output),

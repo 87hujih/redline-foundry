@@ -1,12 +1,19 @@
 {
   "document": {
-    "content_hash": "sha256:3c0dc2f2839ac2afe18e11f2d87c8799b3213c6c9906bd6bc872d1bf6af4b464",
+    "content_hash": "sha256:a957ee9d06f86efcd63579971d6cd60f07faf624fc8938a628bdd65d39b16b24",
     "node_ids": [
       "node_99fc623d88ab9efe98f09908eb6eef73",
       "node_74f0f7e3e13228ea1818c4d7dc83fe70",
       "node_986a630908cff545ed217c84e6871cc1",
-      "node_d58d604bf2c2c4ca8d9f10ebf620bfbf",
-      "node_d9c5520d5a3f6620ceca8cba62d5c4c1"
+      "node_a4efb741f590915e873b5b795e405779",
+      "node_6cb26d5cdec64d56d941a88ed0e54dbc"
+    ],
+    "node_hashes": [
+      "sha256:43de2627772aee859bb1ff6bf7eef323829931ca0d70b0bd13aa98f7e82eade4",
+      "sha256:215eced96c983a25f933bd0c653dbd30abb969b342ceb9ee42464d2045b6f449",
+      "sha256:394d1af99e01d275ce126052d7a8305831271a847a61994327e5d05a98a8d8c7",
+      "sha256:f35fce9ec9b663d0211af4fc9f4cef24bc8cdca041138f4fdbd7c42952272402",
+      "sha256:f63654a53cdc0d8bac4135f7443d6875c67502022acc30480b2481ec6a372949"
     ],
     "chunks": ["Hello world.", "Python pgvector."]
   },

@@ -1,1 +1,1 @@
-"""HTTP route adapters."""
+"""HTTP 路由适配器。"""

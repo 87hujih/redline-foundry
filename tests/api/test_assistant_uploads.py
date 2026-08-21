@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -212,6 +212,24 @@ async def test_upload_rejects_invalid_session_missing_file_and_oversize() -> Non
     assert invalid.status_code == 400 and invalid.json() == {"error": "会话 ID 非法"}
     assert missing.status_code == 400 and missing.json() == {"error": "必须上传文件"}
     assert oversize.status_code == 413 and oversize.json() == {"error": "上传文件过大"}
+    assert uploader.calls == []
+
+
+@pytest.mark.anyio
+async def test_upload_uses_configured_production_size_limit() -> None:
+    uploader = Uploader()
+    application = app(uploader)
+    application.state.dependencies = replace(application.state.dependencies, upload_max_bytes=4)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=application), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/api/assistant/conversations/files",
+            files={"file": ("review.md", b"12345", "text/markdown")},
+            headers=signed_headers("/api/assistant/conversations/files"),
+        )
+
+    assert response.status_code == 413
     assert uploader.calls == []
 
 

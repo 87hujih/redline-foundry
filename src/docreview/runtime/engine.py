@@ -1,4 +1,4 @@
-"""Durable runtime worker orchestration without owning business state."""
+"""不持有业务状态的持久化 Runtime worker 编排。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from docreview.runtime.contracts import AttemptFinish, EngineConfig, OutcomeCommit, RetryCommit
-from docreview.runtime.errors import ErrorCategory, ExecutionFailure, TimeoutScope
+from docreview.runtime.errors import ErrorCategory, ExecutionFailure, LeaseLostError, TimeoutScope
 from docreview.runtime.models import (
     Attempt,
     ExecutionInput,
@@ -79,7 +79,7 @@ class RuntimeEngine:
             or config.retry_base <= timedelta(0)
             or config.retry_max < config.retry_base
         ):
-            raise ValueError("invalid durable runtime engine configuration")
+            raise ValueError("无效的 持久化 运行时 引擎 配置")
         self.config = config
         self.store = store
         self.executor = executor
@@ -93,12 +93,13 @@ class RuntimeEngine:
         work = await self.store.claim_step(self.config.worker_id, now, self.config.lease_duration)
         if work is None:
             return False
+        # claim 返回的 lease_generation 是 fencing token，heartbeat 与提交必须原样携带。
         if work.cancel_requested_at is not None:
             await self._commit_terminal(
                 work,
                 StepStatus.CANCELLED,
                 RunStatus.CANCELLED,
-                ExecutionFailure(ErrorCategory.CANCELLED, "run cancellation requested"),
+                ExecutionFailure(ErrorCategory.CANCELLED, "收到取消运行请求"),
             )
             return True
         if work.run_deadline_at is not None and work.run_deadline_at <= now:
@@ -129,6 +130,13 @@ class RuntimeEngine:
             result = await self._execute_with_heartbeat(work, trace_id, timeout)
         except TimeoutError:
             result = ExecutionResult(error=timeout_failure(timeout_scope))
+        except LeaseLostError:
+            raise
+        except Exception as error:
+            result = ExecutionResult(
+                error=_executor_failure(error),
+                retry_count=_retry_count(error),
+            )
         validation_error = self._validate_result(result)
         if validation_error is not None:
             result = ExecutionResult(
@@ -264,10 +272,10 @@ class RuntimeEngine:
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if heartbeat_task in done:
-                # Calling result() is deliberate: stale-worker fencing errors
-                # must reach the worker boundary and cannot be downgraded.
+                # 刻意调用 result()：过期 worker 的 fencing 错误必须到达 worker
+                # 边界，不能被降级吞掉。
                 heartbeat_task.result()
-                raise RuntimeError("heartbeat task exited unexpectedly")
+                raise RuntimeError("操作失败: 心跳 任务 意外退出")
             if executor_task not in done:
                 raise TimeoutError
             return executor_task.result()
@@ -313,13 +321,13 @@ class RuntimeEngine:
     @staticmethod
     def _limit_error(work: WorkItem) -> ExecutionFailure | None:
         if work.max_steps > 0 and work.step_count > work.max_steps:
-            return ExecutionFailure(ErrorCategory.POLICY_BLOCKED, "maximum steps exceeded")
+            return ExecutionFailure(ErrorCategory.POLICY_BLOCKED, "超出最大步骤数")
         if work.max_tool_calls > 0 and work.tool_call_count >= work.max_tool_calls:
-            return ExecutionFailure(ErrorCategory.POLICY_BLOCKED, "maximum tool calls reached")
+            return ExecutionFailure(ErrorCategory.POLICY_BLOCKED, "达到最大工具调用次数")
         if work.token_budget is not None and work.tokens_used >= work.token_budget:
-            return ExecutionFailure(ErrorCategory.POLICY_BLOCKED, "token budget exhausted")
+            return ExecutionFailure(ErrorCategory.POLICY_BLOCKED, "令牌预算已耗尽")
         if work.cost_budget is not None and work.cost_used >= work.cost_budget:
-            return ExecutionFailure(ErrorCategory.POLICY_BLOCKED, "cost budget exhausted")
+            return ExecutionFailure(ErrorCategory.POLICY_BLOCKED, "成本预算已耗尽")
         return None
 
     @staticmethod
@@ -346,6 +354,30 @@ class RuntimeEngine:
                 return "next steps contain a duplicate step key"
             seen.add(item.step_key.strip())
         return None
+
+
+def _executor_failure(error: Exception) -> ExecutionFailure:
+    raw_category = getattr(error, "category", "")
+    category = str(getattr(raw_category, "value", raw_category))
+    mapped = {
+        "rate_limited": ErrorCategory.RATE_LIMITED,
+        "timeout": ErrorCategory.TIMEOUT,
+        "retryable_upstream": ErrorCategory.RETRYABLE_UPSTREAM,
+    }.get(category)
+    if mapped is not None:
+        return ExecutionFailure(mapped, "上游执行失败")
+    if isinstance(error, PermissionError):
+        return ExecutionFailure(ErrorCategory.PERMISSION_DENIED, "执行权限不足")
+    if isinstance(error, LookupError):
+        return ExecutionFailure(ErrorCategory.NOT_FOUND, "执行所需事实不存在")
+    if isinstance(error, ValueError):
+        return ExecutionFailure(ErrorCategory.INVALID_INPUT, "执行结果未通过确定性校验")
+    return ExecutionFailure(ErrorCategory.TERMINAL_UPSTREAM, "执行边界失败")
+
+
+def _retry_count(error: Exception) -> int:
+    value = getattr(error, "retry_count", 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
 __all__ = ["RuntimeEngine", "RuntimeExecutor", "RuntimeStore", "backoff"]

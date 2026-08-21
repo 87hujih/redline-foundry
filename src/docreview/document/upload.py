@@ -1,25 +1,33 @@
-"""Assistant upload orchestration and frozen DTO mapping."""
+"""Assistant 上传编排与冻结 DTO 映射。"""
 
 from __future__ import annotations
 
+import logging
 import mimetypes
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID, uuid4
 
 from docreview.document.ingestion import ingest
 from docreview.document.parser import DocumentParser, UnsupportedFileTypeError
-from docreview.storage.filestore import LocalFileStore, StoredFile
+from docreview.storage.filestore import LocalFileStore, StagedFile, StoredFile
 from docreview.storage.models import AssistantMessage, AssistantSession, Resource
 from docreview.storage.postgres.upload_write import UploadWriteRequest, UploadWriteResult
 
+logger = logging.getLogger(__name__)
+
 
 class UploadMetadataWriter(Protocol):
-    async def persist_upload(self, request: UploadWriteRequest) -> UploadWriteResult: ...
+    async def persist_upload(
+        self,
+        request: UploadWriteRequest,
+        before_commit: Callable[[], Awaitable[None]],
+    ) -> UploadWriteResult: ...
 
 
 class UploadCompensationError(RuntimeError):
-    """A metadata failure was followed by a failed new-object cleanup."""
+    """元数据失败后, 新对象的清理也失败。"""
 
     def __init__(self, upload_error: BaseException, cleanup_error: Exception) -> None:
         super().__init__("upload failed and new file cleanup also failed")
@@ -108,7 +116,7 @@ class DocumentUploadService:
         try:
             UUID(session_id)
         except (AttributeError, ValueError) as error:
-            raise ValueError("assistant session id must be a UUID") from error
+            raise ValueError("助手会话 ID 必须是 UUID") from error
         return await self._upload(
             workspace_id=workspace_id,
             principal_type=principal_type,
@@ -161,7 +169,9 @@ class DocumentUploadService:
         version_id = str(uuid4())
         file_id = str(uuid4())
         message_id = str(uuid4())
-        stored = await self.store.save(content)
+        # 文件先进入不可见 staging，元数据事务准备提交时才原子发布。
+        staged = await self.store.stage(content)
+        published: StoredFile | None = None
         try:
             try:
                 parsed = await ingest(
@@ -177,6 +187,7 @@ class DocumentUploadService:
                 error_message = f"文件导入失败：{error}"  # noqa: RUF001
                 resource_title = None
                 resource_content = None
+                canonical_document = None
                 persisted_resource_id = None
                 persisted_version_id = None
                 message_kind = "system"
@@ -193,6 +204,7 @@ class DocumentUploadService:
                 resource_content = "\n\n".join(
                     block.text.strip() for block in parsed.parsed.blocks if block.text.strip()
                 )
+                canonical_document = parsed.document
                 persisted_resource_id = resource_id
                 persisted_version_id = version_id
                 message_kind = "session_file"
@@ -207,39 +219,63 @@ class DocumentUploadService:
                 }
                 session_title = resource_title
 
-            result = await self.metadata.persist_upload(
-                UploadWriteRequest(
-                    workspace_id=workspace_id,
-                    principal_type=principal_type,
-                    principal_id=principal_id,
-                    create_session=create_session,
-                    session_id=session_id,
-                    session_title=session_title,
-                    resource_id=persisted_resource_id,
-                    version_id=persisted_version_id,
-                    resource_title=resource_title,
-                    resource_content=resource_content,
-                    file_id=file_id,
-                    file_name=file_name,
-                    content_type=mimetypes.guess_type(file_name)[0] or "application/octet-stream",
-                    stored=stored,
-                    message_id=message_id,
-                    message_kind=message_kind,
-                    message_payload=payload,
-                    error_message=error_message,
-                )
+            request = UploadWriteRequest(
+                workspace_id=workspace_id,
+                principal_type=principal_type,
+                principal_id=principal_id,
+                create_session=create_session,
+                session_id=session_id,
+                session_title=session_title,
+                resource_id=persisted_resource_id,
+                version_id=persisted_version_id,
+                resource_title=resource_title,
+                resource_content=resource_content,
+                file_id=file_id,
+                file_name=file_name,
+                content_type=mimetypes.guess_type(file_name)[0] or "application/octet-stream",
+                stored=staged.descriptor(),
+                message_id=message_id,
+                message_kind=message_kind,
+                message_payload=payload,
+                error_message=error_message,
+                canonical_document=canonical_document,
             )
+
+            async def publish_before_commit() -> None:
+                nonlocal published
+                published = await self.store.promote(staged)
+
+            result = await self.metadata.persist_upload(request, publish_before_commit)
+            if published is None:
+                raise RuntimeError("上传 元数据 已提交 且没有 文件 发布")
         except BaseException as error:
             try:
-                await self._discard_uncommitted(stored)
+                # 仅补偿本次新建的对象，不能删除由内容寻址幂等复用的既有对象。
+                await self._discard_uncommitted(staged, published)
             except Exception as cleanup_error:
-                raise UploadCompensationError(error, cleanup_error) from cleanup_error
+                logger.error(
+                    "upload cleanup failed",
+                    extra={
+                        "event": "assistant.upload.cleanup_failed",
+                        "storage_key": staged.storage_key,
+                        "upload_error_type": type(error).__name__,
+                        "cleanup_error_type": type(cleanup_error).__name__,
+                    },
+                    exc_info=(
+                        type(cleanup_error),
+                        cleanup_error,
+                        cleanup_error.__traceback__,
+                    ),
+                )
+                raise UploadCompensationError(error, cleanup_error) from error
             raise
         return _upload_dto(result)
 
-    async def _discard_uncommitted(self, stored: StoredFile) -> None:
-        if stored.created:
-            await self.store.delete(stored.storage_key)
+    async def _discard_uncommitted(self, staged: StagedFile, published: StoredFile | None) -> None:
+        if published is None:
+            await self.store.cleanup_staged(staged)
+        elif published.created:
+            await self.store.delete(published.storage_key)
 
 
 __all__ = ["DocumentUploadService", "UploadCompensationError", "UploadMetadataWriter"]

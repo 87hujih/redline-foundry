@@ -1,1 +1,1 @@
-"""Logging and observability helpers."""
+"""日志与可观测性辅助函数。"""

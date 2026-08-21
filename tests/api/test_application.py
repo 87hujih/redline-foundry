@@ -2,6 +2,7 @@ import json
 import logging
 import re
 from collections.abc import Sequence
+from importlib import import_module
 from io import StringIO
 from typing import Protocol, cast
 
@@ -24,6 +25,29 @@ class IncludedRoute(Protocol):
 def make_app(*, origins: str = "https://app.example.com") -> FastAPI:
     settings = load_settings({"CORS_ALLOWED_ORIGINS": origins})
     return create_app(settings)
+
+
+def test_windows_entrypoint_selects_psycopg_compatible_loop_before_uvicorn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main_module = import_module("docreview.api.main")
+    captured: dict[str, object] = {}
+
+    def run_stub(_app: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(main_module.sys, "platform", "win32")
+    monkeypatch.setattr(main_module, "load_settings", lambda: load_settings({}))
+    monkeypatch.setattr(main_module.uvicorn, "run", run_stub)
+
+    main_module.main()
+
+    assert captured["loop"] == "docreview.api.main:windows_selector_loop_factory"
+    loop = main_module.windows_selector_loop_factory()
+    try:
+        assert isinstance(loop, main_module.asyncio.SelectorEventLoop)
+    finally:
+        loop.close()
 
 
 @pytest.mark.anyio
@@ -158,6 +182,7 @@ def test_active_online_public_routes_are_registered() -> None:
         ("GET", "/healthz"),
         ("GET", "/api/resources"),
         ("GET", "/api/resources/{resource_id}"),
+        ("DELETE", "/api/resources/{resource_id}"),
         ("GET", "/api/resources/{resource_id}/export"),
         ("GET", "/api/resources/{resource_id}/search"),
         ("GET", "/api/agent/runs"),
@@ -167,6 +192,8 @@ def test_active_online_public_routes_are_registered() -> None:
         ("GET", "/api/assistant/capabilities"),
         ("GET", "/api/assistant/sessions"),
         ("GET", "/api/assistant/sessions/{session_id}"),
+        ("GET", "/api/assistant/sessions/{session_id}/resource-selection"),
+        ("PUT", "/api/assistant/sessions/{session_id}/resource-selection"),
         ("DELETE", "/api/assistant/sessions/{session_id}"),
         ("POST", "/api/assistant/conversations"),
         ("POST", "/api/assistant/conversations/stream"),

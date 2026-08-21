@@ -132,7 +132,7 @@ async def test_projection_replays_after_receipt_gap_and_publishes_once() -> None
     assert committer.calls == [("turn-1", "outbox-projection:event-1")]
     assert store.published == ["event-1"]
 
-    # A second delivery is an idempotent receipt replay, not a second public write.
+    # 第二次投递是幂等 receipt replay，不是第二次公开写入。
     await projector.project(item)
     assert len(committer.calls) == 1
     assert PROJECTION_NAME == "agent-turn-runtime-v1"
@@ -169,7 +169,7 @@ async def test_projection_receipt_gap_replays_same_outcome_key_without_duplicate
     projector = RuntimeProjector(Reader(), committer, receipts)
     await projector.project(item)
     assert committer.calls == [("turn-1", "outbox-projection:event-1")]
-    # Simulate a crash after the public outcome commit but before receipt write.
+    # 模拟公开 outcome 提交后、receipt 写入前发生崩溃。
     receipts.values.clear()
     await projector.project(item)
     assert committer.calls == [("turn-1", "outbox-projection:event-1")]

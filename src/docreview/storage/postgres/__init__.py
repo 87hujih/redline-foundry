@@ -1,1 +1,1 @@
-"""Psycopg 3 PostgreSQL adapters."""
+"""Psycopg 3 PostgreSQL 适配器。"""

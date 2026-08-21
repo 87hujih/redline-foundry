@@ -22,11 +22,25 @@ def test_turn_acceptance_is_one_transactional_fact_closure() -> None:
     assert "on conflict (idempotency_scope, request_id) do nothing" in create
     assert "insert into assistant_messages" in facts
     assert "insert into agent_runs" in facts
-    assert "'durable'" not in facts  # runtime mode is a bound value, not a fallback default.
+    assert "'durable'" not in facts  # Runtime mode 是绑定值，不是 fallback 默认值。
     assert "insert into agent_steps" in facts
     assert "'understand_goal:1', 'understandgoal'" in facts
     assert "insert into agent_turn_events" in facts
     assert "'turn.accepted'" in facts and "'run.queued'" in facts
+    assert "select %s::uuid, 1, 'turn.accepted'" in facts
+    assert "select %s::uuid, 2, 'run.queued'" in facts
+    assert (
+        "jsonb_build_object('turn_id', %s::text, 'resource_id', %s::text, "
+        "'runtime_mode', %s::text)" in facts
+    )
+    assert "'run_id', inserted_run.id::text" in facts
+    assert "'request_fact_id', %s::text" in facts
+    assert "'current_node', 'understandgoal'" in facts
+    assert "'fact_id', 'budget:' || inserted_run.id::text || ':0'" in facts
+    assert "'steps_remaining', 64" in facts
+    assert "'tool_calls_remaining', 32" in facts
+    assert "'message'" not in facts.partition("inserted_step as")[2].partition(")")[0]
+    assert "jsonb_build_object('turn_id', %s::text)" in facts
     assert "insert into outbox_events" in facts
     assert "'agent.turn.accepted'" in facts
 

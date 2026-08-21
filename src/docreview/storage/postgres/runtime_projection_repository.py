@@ -1,4 +1,4 @@
-"""PostgreSQL adapters for durable runtime snapshots, outcomes and receipts."""
+"""持久化 Runtime snapshot、outcome 与 receipt 的 PostgreSQL 适配器。"""
 
 from __future__ import annotations
 
@@ -19,9 +19,13 @@ def _timestamp(value: datetime) -> str:
 
 LOAD_STEP_SNAPSHOT_SQL = """
 SELECT run.turn_id::text, run.id::text, step.step_type,
-       COALESCE(step.output_json, '{}'::jsonb), step.error_json
+       COALESCE(step.output_json, '{}'::jsonb), step.error_json,
+       outcome.content_json
 FROM agent_runs AS run
 JOIN agent_steps AS step ON step.run_id = run.id
+LEFT JOIN agent_artifacts AS outcome
+  ON outcome.run_id = run.id AND outcome.workspace_id = run.workspace_id
+ AND outcome.id::text = step.output_json->>'outcome_fact_id'
 WHERE run.id = %s AND step.id = %s
   AND run.runtime_mode = 'durable' AND run.turn_id IS NOT NULL
 """
@@ -177,7 +181,7 @@ class RuntimeProjectionRepository:
     async def load(self, event: Outbox) -> RuntimeSnapshot:
         run_id = str(event.payload.get("run_id", "")).strip()
         if not run_id:
-            raise ValueError("projection event run_id is required")
+            raise ValueError("投影 事件 run_id 为必填项")
         if event.event_type == "agent.step.outcome_committed":
             target_id = str(event.payload.get("step_id", "")).strip()
             query = LOAD_STEP_SNAPSHOT_SQL
@@ -185,21 +189,31 @@ class RuntimeProjectionRepository:
             target_id = str(event.payload.get("approval_id", "")).strip()
             query = LOAD_REJECTED_APPROVAL_SNAPSHOT_SQL
         else:
-            raise ValueError(f"unsupported projection event {event.event_type!r}")
+            raise ValueError(f"不支持的 投影 事件{event.event_type!r}")
         if not target_id:
-            raise ValueError("projection event target id is required")
+            raise ValueError("投影 事件 目标 id 为必填项")
         async with self._pool.connection() as connection, connection.cursor() as cursor:
             await cursor.execute(query, (run_id, target_id))
             row = await cursor.fetchone()
         if row is None:
-            raise LookupError("durable projection snapshot not found")
+            raise LookupError("持久化 投影 快照 未找到")
         if event.event_type == "agent.step.outcome_committed":
+            output = _object(row[3])
+            if (
+                str(row[2]) == "RenderOutcome"
+                and str(event.payload.get("run_status", "")) == "succeeded"
+            ):
+                outcome = _object(row[5])
+                message = outcome.get("message")
+                if not isinstance(message, str) or not message.strip():
+                    raise ValueError("RenderOutcome 投影 需要 类型化 消息")
+                output = {**output, "message": message}
             return RuntimeSnapshot(
                 turn_id=str(row[0]),
                 run_id=str(row[1]),
                 run_status=str(event.payload.get("run_status", "")),
                 step_type=str(row[2]),
-                output=_object(row[3]),
+                output=output,
                 error=None if row[4] is None else _object(row[4]),
             )
         return RuntimeSnapshot(
@@ -251,16 +265,16 @@ class RuntimeProjectionRepository:
                 await cursor.execute(GET_OUTCOME_SQL, (turn_id, idempotency_key))
                 existing = await cursor.fetchone()
                 if existing is None or str(existing[0]) != digest:
-                    raise ValueError("projection outcome idempotency conflict")
+                    raise ValueError("投影 结果 幂等 冲突")
                 return
             outcome_id = str(inserted[0])
             await cursor.execute(LOCK_TURN_SQL, (turn_id,))
             turn = await cursor.fetchone()
             if turn is None:
-                raise LookupError("projection turn not found")
+                raise LookupError("投影 轮次 未找到")
             session_id, current_status = str(turn[0]), str(turn[1])
             if not _can_transition(current_status, status):
-                raise ValueError(f"invalid turn transition {current_status!r} -> {status!r}")
+                raise ValueError(f"无效的 轮次 转换{current_status!r} -> {status!r}")
             await cursor.execute(TURN_SEQUENCE_BASE_SQL, (turn_id,))
             sequence_row = await cursor.fetchone()
             sequence = int(cast(int, sequence_row[0])) if sequence_row else 0
@@ -280,7 +294,7 @@ class RuntimeProjectionRepository:
                 )
                 message_row = await cursor.fetchone()
                 if message_row is None:
-                    raise RuntimeError("projection message insert returned no row")
+                    raise RuntimeError("投影 消息 写入 未返回数据行")
                 sequence += 1
                 await cursor.execute(
                     INSERT_TURN_EVENT_SQL,
@@ -350,14 +364,14 @@ class RuntimeProjectionRepository:
 
     async def record(self, event_id: str, projection_name: str, payload_hash: str) -> None:
         if not payload_hash.startswith("sha256:") or len(payload_hash) != 71:
-            raise ValueError("projection payload hash is invalid")
+            raise ValueError("投影 载荷 哈希 无效")
         async with self._pool.connection() as connection, connection.cursor() as cursor:
             await cursor.execute(RECEIPT_INSERT_SQL, (event_id, projection_name, payload_hash))
             if int(getattr(cursor, "rowcount", 1)) != 1:
                 await cursor.execute(RECEIPT_GET_HASH_SQL, (event_id, projection_name))
                 row = await cursor.fetchone()
                 if row is None or str(row[0]) != payload_hash:
-                    raise ValueError("projection receipt idempotency conflict")
+                    raise ValueError("投影 回执 幂等 冲突")
             await connection.commit()
 
 
@@ -367,7 +381,7 @@ def _object(value: object) -> dict[str, object]:
     if isinstance(value, str):
         value = json.loads(value)
     if not isinstance(value, dict):
-        raise ValueError("projection JSON must be an object")
+        raise ValueError("投影 JSON 必须是对象")
     return cast(dict[str, object], value)
 
 

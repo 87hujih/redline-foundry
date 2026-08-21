@@ -1,4 +1,4 @@
-"""PostgreSQL fact closure for durable assistant Turns."""
+"""持久化 Assistant Turn 的 PostgreSQL 事实闭环。"""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ RETURNING id::text, session_id::text, request_id, status, created_at, updated_at
 
 ACCEPT_FACTS_SQL = """
 WITH locked_session AS MATERIALIZED (
-    SELECT id FROM assistant_sessions WHERE id = %s FOR UPDATE
+    SELECT id FROM assistant_sessions WHERE id = %s AND workspace_id = %s FOR UPDATE
 ),
 created_session AS (
     INSERT INTO assistant_sessions (workspace_id, title)
@@ -33,9 +33,14 @@ created_session AS (
 selected_session AS MATERIALIZED (
     SELECT id FROM locked_session UNION ALL SELECT id FROM created_session
 ),
+locked_resource AS MATERIALIZED (
+    SELECT id FROM resources
+    WHERE id = %s AND workspace_id = %s
+    FOR KEY SHARE
+),
 linked_turn AS (
     UPDATE agent_turns SET session_id = selected_session.id, updated_at = %s
-    FROM selected_session WHERE agent_turns.id = %s
+    FROM selected_session, locked_resource WHERE agent_turns.id = %s
     RETURNING agent_turns.id, selected_session.id AS session_id
 ),
 inserted_message AS (
@@ -48,10 +53,17 @@ inserted_message AS (
            jsonb_build_object('content', %s::jsonb ->> 'message'), %s
     FROM linked_turn RETURNING session_id
 ),
-updated_session AS (
+updated_existing_session AS (
     UPDATE assistant_sessions SET last_message_at = %s, updated_at = %s
-    FROM inserted_message WHERE assistant_sessions.id = inserted_message.session_id
+    FROM inserted_message, locked_session
+    WHERE assistant_sessions.id = inserted_message.session_id
+      AND assistant_sessions.id = locked_session.id
     RETURNING assistant_sessions.id
+),
+updated_session AS MATERIALIZED (
+    SELECT id FROM created_session
+    UNION ALL
+    SELECT id FROM updated_existing_session
 ),
 inserted_run AS (
     INSERT INTO agent_runs (
@@ -61,20 +73,34 @@ inserted_run AS (
     )
     SELECT %s, %s, %s, updated_session.id, 'turn:' || %s, %s, %s,
            %s, %s, %s, %s, 'queued', %s::jsonb ->> 'message', 64, 32,
-           jsonb_build_object('turn_id', %s, 'resource_id', %s, 'runtime_mode', %s)
+           jsonb_build_object('turn_id', %s::text, 'resource_id', %s::text,
+                              'runtime_mode', %s::text)
     FROM updated_session RETURNING id, session_id
 ),
 inserted_step AS (
     INSERT INTO agent_steps (run_id, step_key, step_type, input_json, max_attempts)
     SELECT inserted_run.id, 'understand_goal:1', 'UnderstandGoal',
-           jsonb_build_object('message', %s::jsonb ->> 'message', 'resource_id', %s), 5
+           jsonb_build_object(
+               'run_id', inserted_run.id::text,
+               'request_fact_id', %s::text,
+               'current_node', 'UnderstandGoal',
+               'budget', jsonb_build_object(
+                   'fact_id', 'budget:' || inserted_run.id::text || ':0',
+                   'steps_remaining', 64,
+                   'tool_calls_remaining', 32,
+                   'tokens_remaining', NULL,
+                   'cost_remaining', NULL,
+                   'deadline_exceeded', false,
+                   'exhausted_reason', NULL
+               )
+           ), 5
     FROM inserted_run RETURNING id, run_id
 ),
 inserted_events AS (
     INSERT INTO agent_turn_events (turn_id, sequence_no, event_type, payload_json, created_at)
-    SELECT %s, 1, 'turn.accepted', jsonb_build_object('turn_id', %s), %s
+    SELECT %s::uuid, 1, 'turn.accepted', jsonb_build_object('turn_id', %s::text), %s
     UNION ALL
-    SELECT %s, 2, 'run.queued', jsonb_build_object('run_id', inserted_step.run_id::text), %s
+    SELECT %s::uuid, 2, 'run.queued', jsonb_build_object('run_id', inserted_step.run_id::text), %s
     FROM inserted_step RETURNING turn_id
 ),
 inserted_outbox AS (
@@ -82,7 +108,8 @@ inserted_outbox AS (
         aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, created_at
     )
     SELECT 'agent_turn', %s, 'agent.turn.accepted', 'turn-accepted:' || %s,
-           jsonb_build_object('turn_id', %s, 'run_id', inserted_step.run_id::text), 'pending', %s
+           jsonb_build_object('turn_id', %s::text, 'run_id', inserted_step.run_id::text),
+           'pending', %s
     FROM inserted_step RETURNING id
 )
 SELECT inserted_run.session_id::text, inserted_run.id::text FROM inserted_run, inserted_outbox
@@ -167,9 +194,9 @@ class TurnRepository:
                 await cursor.execute(SELECT_TURN_SQL, (value.idempotency_scope, request.request_id))
                 row = await cursor.fetchone()
                 if row is None:
-                    raise RuntimeError("turn idempotency lookup returned no row")
+                    raise RuntimeError("轮次 幂等 查询 未返回数据行")
                 if str(row[7]) != value.input_hash:
-                    raise IdempotencyConflictError("turn request idempotency conflict")
+                    raise IdempotencyConflictError("轮次 请求 幂等 冲突")
                 return _turn(row), False
             turn_id = str(inserted[0])
             now = self._now()
@@ -180,7 +207,7 @@ class TurnRepository:
             )
             facts = await cursor.fetchone()
             if facts is None:
-                raise LookupError("assistant session does not exist")
+                raise LookupError("助手 会话 不存在")
             return Turn(
                 id=turn_id,
                 session_id=str(facts[0]),
@@ -209,7 +236,7 @@ class TurnRepository:
         if isinstance(dto, str):
             dto = json.loads(dto)
         if not isinstance(dto, dict):
-            raise ValueError("public projection DTO must be an object")
+            raise ValueError("公开 投影 DTO 必须是对象")
         return PublicProjection(
             status=TurnStatus(str(row[0])),
             dto=cast(dict[str, Any], dto),
@@ -234,7 +261,7 @@ def _event(row: tuple[object, ...]) -> TurnEvent:
     if isinstance(payload, str):
         payload = json.loads(payload)
     if not isinstance(payload, dict):
-        raise ValueError("turn event payload must be an object")
+        raise ValueError("轮次 事件 载荷 必须是对象")
     return TurnEvent(
         id=str(row[0]),
         turn_id=str(row[1]),
@@ -252,8 +279,11 @@ def _accept_fact_params(
     return (
         request.session_id,
         request.workspace_id,
+        request.workspace_id,
         title,
         request.session_id,
+        request.resource_id,
+        request.workspace_id,
         now,
         turn_id,
         value.input_json,
@@ -274,8 +304,7 @@ def _accept_fact_params(
         turn_id,
         request.resource_id,
         request.runtime_mode,
-        value.input_json,
-        request.resource_id,
+        turn_id,
         turn_id,
         turn_id,
         now,

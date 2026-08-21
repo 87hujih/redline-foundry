@@ -1,4 +1,4 @@
-"""Workspace-scoped public Run and Approval query repository."""
+"""Workspace-scoped 公开 Run 与 Approval 查询 repository。"""
 
 from __future__ import annotations
 

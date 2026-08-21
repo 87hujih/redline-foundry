@@ -1,4 +1,4 @@
-"""Bounded project-storage adapter for LangGraph checkpoints."""
+"""有界的项目存储 LangGraph Checkpoint 适配器。"""
 
 from __future__ import annotations
 
@@ -82,8 +82,36 @@ class CheckpointRepository(Protocol):
     def load_step_result(self, run_id: str, step_id: str) -> StoredStepResult | None: ...
 
 
+class AsyncCheckpointRepository(Protocol):
+    async def save_checkpoint(self, value: StoredCheckpoint) -> None: ...
+
+    async def load_checkpoint(
+        self, run_id: str, namespace: str, checkpoint_id: str | None
+    ) -> StoredCheckpoint | None: ...
+
+    async def list_checkpoints(
+        self,
+        run_id: str | None,
+        namespace: str | None,
+        before_checkpoint_id: str | None,
+        limit: int | None,
+    ) -> Sequence[StoredCheckpoint]: ...
+
+    async def save_writes(self, values: Sequence[StoredWrite]) -> None: ...
+
+    async def load_writes(
+        self, run_id: str, namespace: str, checkpoint_id: str
+    ) -> Sequence[StoredWrite]: ...
+
+    async def delete_thread(self, run_id: str) -> None: ...
+
+    async def save_step_result(self, value: StoredStepResult) -> None: ...
+
+    async def load_step_result(self, run_id: str, step_id: str) -> StoredStepResult | None: ...
+
+
 class InMemoryCheckpointRepository:
-    """Offline repository implementing the same adapter contract as project storage."""
+    """离线仓储, 实现与项目存储相同的适配器契约。"""
 
     def __init__(self) -> None:
         self.checkpoints: dict[tuple[str, str, str], StoredCheckpoint] = {}
@@ -94,7 +122,7 @@ class InMemoryCheckpointRepository:
         key = (value.run_id, value.namespace, value.checkpoint_id)
         existing = self.checkpoints.get(key)
         if existing is not None and existing != value:
-            raise RuntimeError("checkpoint idempotency conflict")
+            raise RuntimeError("检查点 幂等 冲突")
         self.checkpoints[key] = value
 
     def load_checkpoint(
@@ -137,8 +165,8 @@ class InMemoryCheckpointRepository:
             )
             existing = self.writes.get(key)
             if existing is not None:
-                # LangGraph may retry the same task write while restoring an
-                # interrupted super-step. The first durable write wins.
+                # 恢复被中断的 super-step 时，LangGraph 可能重试同一 task 写入；
+                # 首次持久化写入胜出。
                 continue
             self.writes[key] = value
 
@@ -165,7 +193,7 @@ class InMemoryCheckpointRepository:
         key = (value.run_id, value.step_id)
         existing = self.step_results.get(key)
         if existing is not None and existing != value:
-            raise RuntimeError("graph Step result idempotency conflict")
+            raise RuntimeError("图 步骤 结果 幂等 冲突")
         self.step_results[key] = value
 
     def load_step_result(self, run_id: str, step_id: str) -> StoredStepResult | None:
@@ -173,7 +201,7 @@ class InMemoryCheckpointRepository:
 
 
 class ProjectCheckpointer(BaseCheckpointSaver[int]):
-    """LangGraph adapter; checkpoints are reconstructable, bounded project records."""
+    """LangGraph 适配器; Checkpoint 是可重建且有界的项目记录。"""
 
     def __init__(
         self,
@@ -184,7 +212,7 @@ class ProjectCheckpointer(BaseCheckpointSaver[int]):
     ) -> None:
         super().__init__()
         if max_checkpoint_bytes <= 0 or max_write_bytes <= 0:
-            raise ValueError("checkpoint byte limits must be positive")
+            raise ValueError("检查点 字节 限制 必须为正数")
         self.repository = repository
         self.max_checkpoint_bytes = max_checkpoint_bytes
         self.max_write_bytes = max_write_bytes
@@ -199,9 +227,9 @@ class ProjectCheckpointer(BaseCheckpointSaver[int]):
         namespace = str(configurable.get("checkpoint_ns", ""))
         checkpoint_id = get_checkpoint_id(config)
         if not run_id or thread_id != run_id:
-            raise ValueError("checkpoint thread_id must equal the durable run_id")
+            raise ValueError("检查点 thread_id 必须等于 该 持久化 run_id")
         if require_checkpoint and not checkpoint_id:
-            raise ValueError("checkpoint_id is required")
+            raise ValueError("checkpoint_id 为必填项")
         return run_id, namespace, checkpoint_id
 
     @staticmethod
@@ -222,9 +250,9 @@ class ProjectCheckpointer(BaseCheckpointSaver[int]):
             if isinstance(item, dict):
                 typed = cast(dict[object, object], item)
                 if any(not isinstance(key, str) for key in typed):
-                    raise TypeError("checkpoint object keys must be strings")
+                    raise TypeError("检查点对象的键必须是字符串")
                 return {cast(str, key): normalize(child) for key, child in typed.items()}
-            raise TypeError(f"unsupported checkpoint value {type(item).__name__}")
+            raise TypeError(f"不支持的 检查点 值{type(item).__name__}")
 
         try:
             encoded = json.dumps(
@@ -235,9 +263,9 @@ class ProjectCheckpointer(BaseCheckpointSaver[int]):
                 allow_nan=False,
             ).encode()
         except (TypeError, ValueError) as error:
-            raise ValueError(f"{field} must contain only bounded JSON values") from error
+            raise ValueError(f"{field} must contain bounded JSON values") from error
         if len(encoded) > maximum:
-            raise ValueError(f"{field} exceeds byte limit")
+            raise ValueError(f"{field}超出字节限制")
         return encoded
 
     @staticmethod
@@ -323,7 +351,7 @@ class ProjectCheckpointer(BaseCheckpointSaver[int]):
         run_id, namespace, parent_id = self._scope(config)
         checkpoint_id = str(checkpoint.get("id", "")).strip()
         if not checkpoint_id:
-            raise ValueError("checkpoint id is required")
+            raise ValueError("必须提供检查点 ID")
         checkpoint_json = self._json(checkpoint, "checkpoint", self.max_checkpoint_bytes)
         metadata_json = self._json(metadata, "checkpoint metadata", self.max_write_bytes)
         self.repository.save_checkpoint(
@@ -423,7 +451,185 @@ class ProjectCheckpointer(BaseCheckpointSaver[int]):
         return await asyncio.to_thread(self.get_step_result, run_id, step_id)
 
 
+class AsyncProjectCheckpointer(ProjectCheckpointer):
+    """生产 PostgreSQL pool 专用的异步 Saver。
+
+    LangGraph 必须通过 ``ainvoke`` 使用此 Saver。同步回退会阻塞事件循环，或
+    在线程中误用异步 pool，因此所有同步入口都显式失败。
+    """
+
+    def __init__(
+        self,
+        repository: AsyncCheckpointRepository,
+        *,
+        max_checkpoint_bytes: int = 512 * 1024,
+        max_write_bytes: int = 256 * 1024,
+    ) -> None:
+        super().__init__(
+            cast(CheckpointRepository, repository),
+            max_checkpoint_bytes=max_checkpoint_bytes,
+            max_write_bytes=max_write_bytes,
+        )
+        self.async_repository = repository
+
+    @staticmethod
+    def _sync_disabled() -> RuntimeError:
+        return RuntimeError("生产环境 检查点 storage 需要 该 async LangGraph 路径")
+
+    def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
+        del config
+        raise self._sync_disabled()
+
+    def list(
+        self,
+        config: RunnableConfig | None,
+        *,
+        filter: dict[str, Any] | None = None,
+        before: RunnableConfig | None = None,
+        limit: int | None = None,
+    ) -> Iterator[CheckpointTuple]:
+        del config, filter, before, limit
+        raise self._sync_disabled()
+
+    def put(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+    ) -> RunnableConfig:
+        del config, checkpoint, metadata, new_versions
+        raise self._sync_disabled()
+
+    def put_writes(
+        self,
+        config: RunnableConfig,
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str = "",
+    ) -> None:
+        del config, writes, task_id, task_path
+        raise self._sync_disabled()
+
+    def delete_thread(self, thread_id: str) -> None:
+        del thread_id
+        raise self._sync_disabled()
+
+    async def _async_tuple(self, value: StoredCheckpoint) -> CheckpointTuple:
+        checkpoint = cast(Checkpoint, self._load(value.checkpoint_json))
+        metadata = cast(CheckpointMetadata, self._load(value.metadata_json))
+        writes = await self.async_repository.load_writes(
+            value.run_id, value.namespace, value.checkpoint_id
+        )
+        pending = [(item.task_id, item.channel, self._load(item.value_json)) for item in writes]
+        parent = (
+            self._config(value.run_id, value.namespace, value.parent_checkpoint_id)
+            if value.parent_checkpoint_id
+            else None
+        )
+        return CheckpointTuple(
+            config=self._config(value.run_id, value.namespace, value.checkpoint_id),
+            checkpoint=checkpoint,
+            metadata=metadata,
+            parent_config=parent,
+            pending_writes=pending,
+        )
+
+    async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
+        run_id, namespace, checkpoint_id = self._scope(config)
+        value = await self.async_repository.load_checkpoint(run_id, namespace, checkpoint_id)
+        return await self._async_tuple(value) if value else None
+
+    async def alist(
+        self,
+        config: RunnableConfig | None,
+        *,
+        filter: dict[str, Any] | None = None,
+        before: RunnableConfig | None = None,
+        limit: int | None = None,
+    ) -> AsyncIterator[CheckpointTuple]:
+        if config is None:
+            run_id = namespace = None
+        else:
+            run_id, namespace, _ = self._scope(config)
+        before_id = self._scope(before)[2] if before is not None else None
+        values = await self.async_repository.list_checkpoints(run_id, namespace, before_id, limit)
+        for value in values:
+            item = await self._async_tuple(value)
+            if filter and not all(
+                item.metadata.get(key) == expected for key, expected in filter.items()
+            ):
+                continue
+            yield item
+
+    async def aput(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+    ) -> RunnableConfig:
+        del new_versions
+        run_id, namespace, parent_id = self._scope(config)
+        checkpoint_id = str(checkpoint.get("id", "")).strip()
+        if not checkpoint_id:
+            raise ValueError("必须提供检查点 ID")
+        await self.async_repository.save_checkpoint(
+            StoredCheckpoint(
+                run_id,
+                namespace,
+                checkpoint_id,
+                parent_id,
+                self._json(checkpoint, "checkpoint", self.max_checkpoint_bytes),
+                self._json(metadata, "checkpoint metadata", self.max_write_bytes),
+            )
+        )
+        return self._config(run_id, namespace, checkpoint_id)
+
+    async def aput_writes(
+        self,
+        config: RunnableConfig,
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str = "",
+    ) -> None:
+        run_id, namespace, checkpoint_id = self._scope(config, require_checkpoint=True)
+        assert checkpoint_id is not None
+        values = [
+            StoredWrite(
+                run_id,
+                namespace,
+                checkpoint_id,
+                task_id,
+                task_path,
+                WRITES_IDX_MAP.get(channel, index),
+                channel,
+                self._json(value, "checkpoint write", self.max_write_bytes),
+            )
+            for index, (channel, value) in enumerate(writes)
+        ]
+        await self.async_repository.save_writes(values)
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        await self.async_repository.delete_thread(thread_id)
+
+    async def aput_step_result(self, run_id: str, step_id: str, result: object) -> None:
+        await self.async_repository.save_step_result(
+            StoredStepResult(
+                run_id,
+                step_id,
+                self._json(result, "graph Step result", self.max_checkpoint_bytes),
+            )
+        )
+
+    async def aget_step_result(self, run_id: str, step_id: str) -> object | None:
+        value = await self.async_repository.load_step_result(run_id, step_id)
+        return self._load(value.result_json) if value is not None else None
+
+
 __all__ = [
+    "AsyncCheckpointRepository",
+    "AsyncProjectCheckpointer",
     "CheckpointRepository",
     "InMemoryCheckpointRepository",
     "ProjectCheckpointer",

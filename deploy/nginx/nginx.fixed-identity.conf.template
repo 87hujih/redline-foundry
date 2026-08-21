@@ -1,0 +1,98 @@
+load_module modules/ngx_http_js_module.so;
+
+env AGENT_RUNTIME_TRUSTED_INGRESS_HMAC_SECRET;
+env DOCREVIEW_FIXED_PRINCIPAL_TYPE;
+env DOCREVIEW_FIXED_PRINCIPAL_ID;
+env DOCREVIEW_FIXED_ORGANIZATION_ID;
+env DOCREVIEW_FIXED_WORKSPACE_ID;
+env DOCREVIEW_FIXED_ROLES;
+
+worker_processes auto;
+pid /var/run/nginx.pid;
+
+events {
+    worker_connections 4096;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    server_tokens off;
+
+    js_import fixed from /etc/nginx/fixed_identity.js;
+
+    map $http_x_request_id $trusted_request_id {
+        ~^[A-Za-z0-9._:-]{1,128}$ $http_x_request_id;
+        default $request_id;
+    }
+
+    upstream docreview_python {
+        zone docreview_python 64k;
+        server ${DOCREVIEW_PYTHON_UPSTREAM}:8080 max_fails=2 fail_timeout=10s;
+        keepalive 64;
+    }
+
+    server {
+        listen 443 ssl http2;
+        server_name ${DOCREVIEW_PUBLIC_SERVER_NAME};
+
+        ssl_certificate /run/secrets/tls_certificate;
+        ssl_certificate_key /run/secrets/tls_private_key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_session_tickets off;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+        root /srv/docreview/frontend;
+        index index.html;
+
+        client_max_body_size 20m;
+        client_body_timeout 30s;
+        keepalive_timeout 65s;
+        send_timeout 300s;
+
+        location ~ ^/api(?:/|$) {
+            js_set $identity_principal_type fixed.principalType;
+            js_set $identity_principal_id fixed.principalId;
+            js_set $identity_organization_id fixed.organizationId;
+            js_set $identity_workspace_id fixed.workspaceId;
+            js_set $identity_roles fixed.roles;
+            js_set $identity_issued_at fixed.issuedAt;
+            js_set $identity_signature fixed.signature;
+
+            proxy_http_version 1.1;
+            proxy_pass http://docreview_python;
+            proxy_request_buffering on;
+            proxy_buffering off;
+            proxy_read_timeout 300s;
+            proxy_send_timeout 60s;
+
+            proxy_set_header Host $host;
+            proxy_set_header Connection "";
+            proxy_set_header X-Request-ID $trusted_request_id;
+            proxy_set_header Last-Event-ID $http_last_event_id;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+            # Overwrite every caller value with the server-owned fixed identity.
+            proxy_set_header X-DocReview-Principal-Type $identity_principal_type;
+            proxy_set_header X-DocReview-Principal-ID $identity_principal_id;
+            proxy_set_header X-DocReview-Organization-ID $identity_organization_id;
+            proxy_set_header X-DocReview-Workspace-ID $identity_workspace_id;
+            proxy_set_header X-DocReview-Identity-Issued-At $identity_issued_at;
+            proxy_set_header X-DocReview-Roles $identity_roles;
+            proxy_set_header X-DocReview-Identity-Signature $identity_signature;
+
+            add_header X-Request-ID $trusted_request_id always;
+        }
+
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+    }
+
+    server {
+        listen 80;
+        server_name ${DOCREVIEW_PUBLIC_SERVER_NAME};
+        return 308 https://$host$request_uri;
+    }
+}

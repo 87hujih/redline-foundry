@@ -1,4 +1,4 @@
-"""Read-only identity and resource-scope queries."""
+"""只读身份与资源 scope 查询。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""HMAC-SHA256 trusted-ingress compatibility adapter."""
+"""HMAC-SHA256 trusted-ingress 兼容适配器。"""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ _LOWER_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
 
 class UntrustedIdentityError(ValueError):
-    """The ingress attestation is absent, invalid, or out of scope."""
+    """Ingress attestation 缺失、无效或超出 scope。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +62,7 @@ def _parse_uuid(value: str) -> str:
     try:
         UUID(value)
     except (ValueError, AttributeError) as error:
-        raise UntrustedIdentityError("durable identity is not trusted") from error
+        raise UntrustedIdentityError("持久化 身份 不可信") from error
     return value
 
 
@@ -74,13 +74,13 @@ def _parse_rfc3339(value: str) -> datetime:
         )
         is None
     ):
-        raise UntrustedIdentityError("durable identity is not trusted")
+        raise UntrustedIdentityError("持久化 身份 不可信")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as error:
-        raise UntrustedIdentityError("durable identity is not trusted") from error
+        raise UntrustedIdentityError("持久化 身份 不可信") from error
     if parsed.tzinfo is None:
-        raise UntrustedIdentityError("durable identity is not trusted")
+        raise UntrustedIdentityError("持久化 身份 不可信")
     return parsed.astimezone(UTC)
 
 
@@ -95,7 +95,7 @@ class TrustedIngressAdapter:
     ) -> None:
         secret_bytes = secret.encode()
         if len(secret_bytes) < 32 or not trust_source.strip() or max_age <= timedelta(0):
-            raise ValueError("trusted ingress requires a 32-byte secret, source, and max age")
+            raise ValueError("可信 入口 需要 32-字节 密钥, 来源, 和 最大有效期")
         self._secret = secret_bytes
         self._trust_source = trust_source.strip()
         self._max_age = max_age
@@ -107,7 +107,7 @@ class TrustedIngressAdapter:
         request_id = request.request_id.strip()
         requested_workspace_id = requested_workspace_id.strip()
         if not method or not path or not request_id:
-            raise UntrustedIdentityError("durable identity is not trusted")
+            raise UntrustedIdentityError("持久化 身份 不可信")
 
         principal_type = _header(request.headers, HEADER_PRINCIPAL_TYPE).lower()
         principal_id = _header(request.headers, HEADER_PRINCIPAL_ID)
@@ -118,7 +118,7 @@ class TrustedIngressAdapter:
         signature = _header(request.headers, HEADER_SIGNATURE)
 
         if principal_type not in {"user", "service"}:
-            raise UntrustedIdentityError("durable identity is not trusted")
+            raise UntrustedIdentityError("持久化 身份 不可信")
         _parse_uuid(principal_id)
         _parse_uuid(organization_id)
         _parse_uuid(workspace_id)
@@ -126,9 +126,9 @@ class TrustedIngressAdapter:
         issued_at = _parse_rfc3339(issued_at_raw)
         now = self._now().astimezone(UTC)
         if issued_at > now + timedelta(seconds=30) or now - issued_at > self._max_age:
-            raise UntrustedIdentityError("durable identity is not trusted")
+            raise UntrustedIdentityError("持久化 身份 不可信")
         if _LOWER_SHA256_HEX.fullmatch(signature) is None:
-            raise UntrustedIdentityError("durable identity is not trusted")
+            raise UntrustedIdentityError("持久化 身份 不可信")
 
         canonical = "\n".join(
             (
@@ -146,9 +146,9 @@ class TrustedIngressAdapter:
         )
         expected = hmac.new(self._secret, canonical.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(signature, expected):
-            raise UntrustedIdentityError("durable identity is not trusted")
+            raise UntrustedIdentityError("持久化 身份 不可信")
         if not requested_workspace_id or workspace_id != requested_workspace_id:
-            raise UntrustedIdentityError("durable identity is not trusted")
+            raise UntrustedIdentityError("持久化 身份 不可信")
 
         roles = tuple(
             sorted({role.strip().lower() for role in roles_raw.split(",") if role.strip()})

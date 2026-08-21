@@ -1,7 +1,7 @@
-"""Active PostgreSQL repository for the Python durable runtime.
+"""Python 持久化 Runtime 的当前 PostgreSQL repository。
 
-The repository intentionally uses small parameterized statements instead of an
-ORM. PostgreSQL rows, constraints and locks remain the business fact source.
+Repository 有意使用小型参数化语句而非 ORM。PostgreSQL 行、约束和锁仍是
+业务事实来源。
 """
 
 from __future__ import annotations
@@ -64,6 +64,7 @@ from docreview.storage.postgres.runtime_sql import (
     FAIL_REJECTED_STEP_SQL,
     FINISH_ATTEMPT_SQL,
     FINISH_TOOL_SQL,
+    GET_APPROVAL_BY_ID_SQL,
     GET_APPROVAL_SQL,
     GET_ATTEMPT_SQL,
     GET_CONTEXT_MANIFEST_SQL,
@@ -71,6 +72,7 @@ from docreview.storage.postgres.runtime_sql import (
     GET_RUN_BY_REQUEST_SQL,
     GET_STEP_BY_KEY_SQL,
     GET_STEP_INPUT_SQL,
+    GET_TOOL_BY_ID_SQL,
     HEARTBEAT_STEP_SQL,
     LOAD_WORK_SQL,
     LOCK_APPROVAL_SQL,
@@ -113,7 +115,7 @@ def _json(value: object) -> str:
     return canonical_json(value)
 
 
-def _go_json(value: object) -> str:
+def _canonical_json(value: object) -> str:
     encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return (
         encoded.replace("<", "\\u003c")
@@ -142,7 +144,7 @@ def _outcome_hash(command: OutcomeCommit) -> str:
         for item in command.next_steps
     ]
     envelope["observations"] = []
-    return f"sha256:{hashlib.sha256(_go_json(envelope).encode()).hexdigest()}"
+    return f"sha256:{hashlib.sha256(_canonical_json(envelope).encode()).hexdigest()}"
 
 
 def _timestamp(value: datetime) -> str:
@@ -162,7 +164,7 @@ def _resource_hash(resources: Sequence[JSONObject]) -> str:
         ),
         key=lambda item: (item["type"], item["id"], item["access"]),
     )
-    return f"sha256:{hashlib.sha256(_go_json(canonical).encode()).hexdigest()}"
+    return f"sha256:{hashlib.sha256(_canonical_json(canonical).encode()).hexdigest()}"
 
 
 def _optional(value: object) -> str | None:
@@ -184,7 +186,7 @@ def _list(value: object) -> list[JSONObject]:
     if isinstance(value, str):
         value = json.loads(value)
     if not isinstance(value, list):
-        raise ValueError("items_json must be a JSON array")
+        raise ValueError("items_json 必须是 JSON 数组")
     items = cast(list[object], value)
     return [require_object(item, "items_json item") for item in items]
 
@@ -192,7 +194,7 @@ def _list(value: object) -> list[JSONObject]:
 def prepare_approval_continuation(
     value: object, approval_id: str, target_idempotency_key: str, status: str
 ) -> JSONObject:
-    """Validate and bind a LangGraph checkpoint resume to one Approval/Patch fact."""
+    """校验 LangGraph Checkpoint 恢复，并将其绑定到一个 Approval/Patch 事实。"""
     continuation = _obj(value, "approval continuation")
     if continuation.get("approval_id") != approval_id or continuation.get("status") != "pending":
         raise ValueError("approval continuation identity mismatch")
@@ -381,6 +383,7 @@ def _outbox(row: tuple[object, ...]) -> Outbox:
 
 
 def _approval(row: tuple[object, ...]) -> Approval:
+    payload = _obj(row[9], "payload_json")
     return Approval(
         id=str(row[0]),
         workspace_id=str(row[1]),
@@ -391,10 +394,20 @@ def _approval(row: tuple[object, ...]) -> Approval:
         idempotency_key=str(row[6]),
         resources=_list(row[7]),
         resources_hash=str(row[8]),
-        payload=_obj(row[9], "payload_json"),
+        payload=payload,
         reason=str(row[10]),
         status=str(row[11]),
-        created_at=cast(datetime, row[12]),
+        requested_by_type=_optional(row[12]),
+        requested_by_id=_optional(row[13]),
+        decision_reason=_optional(row[14]),
+        decided_by_type=_optional(row[15]),
+        decided_by_id=_optional(row[16]),
+        created_at=cast(datetime, row[17]),
+        decided_at=cast(datetime | None, row[18]),
+        resource_id=_optional(payload.get("resource_id")),
+        patch_id=_optional(payload.get("patch_id")),
+        patch_hash=_optional(payload.get("patch_hash")),
+        input_hash=_optional(payload.get("input_hash")),
     )
 
 
@@ -447,7 +460,7 @@ class RuntimeRepository:
         await cursor.execute(GET_RUN_BY_REQUEST_SQL, (command.workspace_id, command.request_id))
         row = await cursor.fetchone()
         if row is None:
-            raise RuntimeError("run idempotency lookup returned no row")
+            raise RuntimeError("运行 幂等 查询 未返回数据行")
         value = _run(row)
         if (
             value.objective != command.objective.strip()
@@ -466,17 +479,17 @@ class RuntimeRepository:
             or value.deadline_at != command.deadline_at
             or not same_json(value.state, command.state)
         ):
-            raise IdempotencyConflictError("run request idempotency conflict")
+            raise IdempotencyConflictError("运行 请求 幂等 冲突")
         return value, False
 
     async def _create_or_get_step(
         self, cursor: AsyncCursor, run_id: str, command: CreateStep
     ) -> tuple[Step, bool]:
         if not command.step_key.strip() or not command.step_type.strip():
-            raise ValueError("step key and type are required")
+            raise ValueError("步骤 键 和 类型 为必填项")
         attempts = command.max_attempts or 5
         if attempts < 1:
-            raise ValueError("max_attempts must be positive")
+            raise ValueError("max_attempts 必须为正数")
         await cursor.execute(
             CREATE_STEP_SQL,
             (
@@ -493,23 +506,24 @@ class RuntimeRepository:
         await cursor.execute(GET_STEP_BY_KEY_SQL, (run_id, command.step_key.strip()))
         row = await cursor.fetchone()
         if row is None:
-            raise RuntimeError("step idempotency lookup returned no row")
+            raise RuntimeError("步骤 幂等 查询 未返回数据行")
         value = _step(row)
         if (
             value.step_type != command.step_type.strip()
             or value.max_attempts != attempts
             or not same_json(value.input, command.input)
         ):
-            raise IdempotencyConflictError("step idempotency conflict")
+            raise IdempotencyConflictError("步骤 幂等 冲突")
         return value, False
 
     async def claim_step(
         self, worker_id: str, now: datetime, lease_duration: timedelta
     ) -> WorkItem | None:
         if not worker_id.strip() or lease_duration <= timedelta(0):
-            raise ValueError("worker_id and lease duration are required")
+            raise ValueError("worker_id 和 租约 持续时间 为必填项")
         async with self._pool.connection() as connection:
             async with connection.transaction(), connection.cursor() as cursor:
+                # 领取顺序固定为 step -> run，避免多副本竞争时形成反向锁顺序。
                 await cursor.execute(
                     CLAIM_STEP_SQL,
                     (now, now, worker_id.strip(), now + lease_duration, now, now, now),
@@ -523,7 +537,7 @@ class RuntimeRepository:
                 await cursor.execute(LOAD_WORK_SQL, (step.run_id,))
                 work_row = await cursor.fetchone()
             if work_row is None:
-                raise RuntimeError("claimed step run disappeared")
+                raise RuntimeError("已领取的 步骤 运行 已消失")
         return WorkItem(
             run_id=step.run_id,
             run_version=int(cast(int, work_row[0])),
@@ -565,7 +579,7 @@ class RuntimeRepository:
                 ),
             )
             if await _rowcount(cursor) != 1:
-                raise LeaseLostError("step lease lost")
+                raise LeaseLostError("步骤 租约 已丢失")
             await connection.commit()
 
     async def start_attempt(
@@ -578,7 +592,7 @@ class RuntimeRepository:
                 await cursor.execute(GET_ATTEMPT_SQL, (step_id, number))
                 row = await cursor.fetchone()
             if row is None:
-                raise RuntimeError("attempt insert returned no row")
+                raise RuntimeError("尝试 写入 未返回数据行")
             await connection.commit()
         return _attempt(row)
 
@@ -618,6 +632,7 @@ class RuntimeRepository:
             connection.transaction(),
             connection.cursor() as cursor,
         ):
+            # fencing 校验、next steps、run 版本推进与 outbox 必须同事务提交。
             await cursor.execute(
                 COMMIT_STEP_OUTCOME_SQL,
                 (
@@ -635,7 +650,7 @@ class RuntimeRepository:
             if await _rowcount(cursor) != 1:
                 if await self._outcome_already_exists(cursor, command):
                     return
-                raise LeaseLostError("step outcome lease lost")
+                raise LeaseLostError("步骤 结果 租约 已丢失")
             for next_step in command.next_steps:
                 await cursor.execute(
                     CREATE_STEP_SQL,
@@ -667,7 +682,7 @@ class RuntimeRepository:
                 ),
             )
             if await _rowcount(cursor) != 1:
-                raise RunConflictError("run outcome version conflict")
+                raise RunConflictError("运行 结果 版本 冲突")
             event_key = f"step-outcome:{command.work.step_id}:{command.work.lease_generation}"
             commit_hash = _outcome_hash(command)
             await self.enqueue_outbox(
@@ -707,7 +722,7 @@ class RuntimeRepository:
             if await _rowcount(cursor) != 1:
                 if await self._retry_already_exists(cursor, command):
                     return
-                raise LeaseLostError("step retry lease lost")
+                raise LeaseLostError("步骤 重试 租约 已丢失")
             await cursor.execute(
                 COMMIT_RUN_OUTCOME_SQL,
                 (
@@ -719,7 +734,7 @@ class RuntimeRepository:
                 ),
             )
             if await _rowcount(cursor) != 1:
-                raise RunConflictError("run retry version conflict")
+                raise RunConflictError("运行 重试 版本 冲突")
             key = f"step-retry:{command.work.step_id}:{command.work.lease_generation}"
             await self.enqueue_outbox(
                 cursor,
@@ -759,234 +774,255 @@ class RuntimeRepository:
             await connection.commit()
         return (int(cast(int, row[0])), int(cast(int, row[1]))) if row else (0, 0)
 
-    async def request_approval(self, command: ApprovalRequest) -> Approval:
+    async def request_approval(
+        self, command: ApprovalRequest, connection: AsyncConnection | None = None
+    ) -> Approval:
         if (
             not command.workspace_id.strip()
             or not command.run_id.strip()
             or not command.step_id.strip()
         ):
-            raise ValueError("approval scope is required")
+            raise ValueError("审批 范围 为必填项")
+        if (
+            command.requested_by_type not in {"user", "service"}
+            or not command.requested_by_id.strip()
+            or not command.tool_name.strip()
+            or not command.tool_version.strip()
+            or not command.idempotency_key.strip()
+            or not command.reason.strip()
+        ):
+            raise ValueError("审批 身份 为必填项")
         resources_hash = _resource_hash(command.resources)
         if resources_hash != command.resources_hash:
-            raise ValueError("approval resources hash does not match canonical resources")
+            raise ValueError("审批 资源 哈希 与预期不匹配 规范 资源")
+        if connection is not None:
+            async with connection.cursor() as cursor:
+                return await self._request_approval_tx(cursor, command, resources_hash)
         async with self._pool.connection() as connection:
             async with connection.transaction(), connection.cursor() as cursor:
-                for resource in command.resources:
-                    kind = str(resource.get("type", "")).strip()
-                    resource_id = str(resource.get("id", "")).strip()
-                    access = str(resource.get("access", "")).strip()
-                    if (
-                        kind not in {"document", "artifact", "task"}
-                        or not resource_id
-                        or access not in {"read", "write"}
-                    ):
-                        raise ValueError("approval resource is invalid")
-                    await cursor.execute(
-                        AUTHORIZE_APPROVAL_RESOURCE_SQL,
-                        (
-                            kind,
-                            resource_id,
-                            command.workspace_id,
-                            resource_id,
-                            command.workspace_id,
-                            resource_id,
-                            command.workspace_id,
-                        ),
-                    )
-                    resource_row = await cursor.fetchone()
-                    if not resource_row or not resource_row[0]:
-                        raise PermissionError("approval resource is outside workspace")
-                await cursor.execute(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1 FROM agent_runs AS run
-                        JOIN agent_steps AS step ON step.run_id = run.id
-                        WHERE run.id = %s AND step.id = %s AND run.workspace_id = %s
-                    )
-                    """,
-                    (command.run_id, command.step_id, command.workspace_id),
-                )
-                scope_row = await cursor.fetchone()
-                if not scope_row or not scope_row[0]:
-                    raise PermissionError("approval target is outside workspace")
-                await cursor.execute(
-                    CREATE_APPROVAL_SQL,
-                    (
-                        command.workspace_id,
-                        command.run_id,
-                        command.step_id,
-                        command.tool_name,
-                        command.tool_version,
-                        command.idempotency_key,
-                        _json(list(command.resources)),
-                        resources_hash,
-                        _json(command.payload),
-                        command.reason,
-                        command.requested_by_type,
-                        command.requested_by_id,
-                    ),
-                )
-                row = await cursor.fetchone()
-                if row is None:
-                    await cursor.execute(
-                        GET_APPROVAL_SQL,
-                        (
-                            command.workspace_id,
-                            command.run_id,
-                            command.idempotency_key,
-                        ),
-                    )
-                    row = await cursor.fetchone()
-                if row is None:
-                    raise RuntimeError("approval idempotency lookup returned no row")
-                value = _approval(row)
-                if (
-                    value.step_id != command.step_id
-                    or value.tool_name != command.tool_name
-                    or value.tool_version != command.tool_version
-                    or value.resources_hash != command.resources_hash
-                    or value.reason != command.reason
-                    or not same_json(value.resources, list(command.resources))
-                    or not same_json(value.payload, command.payload)
-                ):
-                    raise IdempotencyConflictError("approval idempotency conflict")
-                event_key = f"tool-approval-requested:{value.id}"
-                await self.enqueue_outbox(
-                    cursor,
-                    "agent_tool_approval",
-                    value.id,
-                    "agent.tool_approval.requested",
-                    event_key,
-                    {"approval_id": value.id, "run_id": value.run_id, "tool_name": value.tool_name},
-                )
+                value = await self._request_approval_tx(cursor, command, resources_hash)
             return value
 
-    async def decide_approval(self, command: ApprovalDecision) -> Approval:
+    async def _request_approval_tx(
+        self, cursor: AsyncCursor, command: ApprovalRequest, resources_hash: str
+    ) -> Approval:
+        for resource in command.resources:
+            kind = str(resource.get("type", "")).strip()
+            resource_id = str(resource.get("id", "")).strip()
+            access = str(resource.get("access", "")).strip()
+            if (
+                kind not in {"document", "artifact", "task"}
+                or not resource_id
+                or access not in {"read", "write"}
+            ):
+                raise ValueError("审批 资源 无效")
+            await cursor.execute(
+                AUTHORIZE_APPROVAL_RESOURCE_SQL,
+                (
+                    kind,
+                    resource_id,
+                    command.workspace_id,
+                    resource_id,
+                    command.workspace_id,
+                    resource_id,
+                    command.workspace_id,
+                ),
+            )
+            resource_row = await cursor.fetchone()
+            if not resource_row or not resource_row[0]:
+                raise PermissionError("审批 资源 超出 工作区")
+        await cursor.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM agent_runs AS run
+                JOIN agent_steps AS step ON step.run_id = run.id
+                WHERE run.id = %s AND step.id = %s AND run.workspace_id = %s
+            )
+            """,
+            (command.run_id, command.step_id, command.workspace_id),
+        )
+        scope_row = await cursor.fetchone()
+        if not scope_row or not scope_row[0]:
+            raise PermissionError("审批 目标 超出 工作区")
+        await cursor.execute(
+            CREATE_APPROVAL_SQL,
+            (
+                command.workspace_id,
+                command.run_id,
+                command.step_id,
+                command.tool_name,
+                command.tool_version,
+                command.idempotency_key,
+                _json(list(command.resources)),
+                resources_hash,
+                _json(command.payload),
+                command.reason,
+                command.requested_by_type,
+                command.requested_by_id,
+            ),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            await cursor.execute(
+                GET_APPROVAL_SQL,
+                (command.workspace_id, command.run_id, command.idempotency_key),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            raise RuntimeError("审批 幂等 查询 未返回数据行")
+        value = _approval(row)
+        if (
+            value.step_id != command.step_id
+            or value.tool_name != command.tool_name
+            or value.tool_version != command.tool_version
+            or value.resources_hash != command.resources_hash
+            or value.reason != command.reason
+            or value.requested_by_type != command.requested_by_type
+            or value.requested_by_id != command.requested_by_id
+            or not same_json(value.resources, list(command.resources))
+            or not same_json(value.payload, command.payload)
+        ):
+            raise IdempotencyConflictError("审批 幂等 冲突")
+        event_key = f"tool-approval-requested:{value.id}"
+        await self.enqueue_outbox(
+            cursor,
+            "agent_tool_approval",
+            value.id,
+            "agent.tool_approval.requested",
+            event_key,
+            {"approval_id": value.id, "run_id": value.run_id, "tool_name": value.tool_name},
+        )
+        return value
+
+    async def decide_approval(
+        self, command: ApprovalDecision, connection: AsyncConnection | None = None
+    ) -> Approval:
         if command.status not in {"approved", "rejected"}:
-            raise ValueError("approval status must be approved or rejected")
+            raise ValueError("审批 状态 必须是 已批准 或 已拒绝")
+        if not command.reason.strip():
+            raise ValueError("审批 决定 原因 为必填项")
+        if connection is not None:
+            async with connection.cursor() as cursor:
+                return await self._decide_approval_tx(cursor, command)
         async with self._pool.connection() as connection:
             async with connection.transaction(), connection.cursor() as cursor:
-                if command.decided_by_type != "user":
-                    raise PermissionError("approval decisions require a trusted user")
-                await cursor.execute(
-                    AUTHORIZE_APPROVAL_DECISION_SQL,
-                    (command.workspace_id, command.decided_by_id),
-                )
-                allowed = await cursor.fetchone()
-                if not allowed or not allowed[0]:
-                    raise PermissionError("approval decision requires active owner or admin")
-                await cursor.execute(LOCK_APPROVAL_SQL, (command.approval_id, command.workspace_id))
-                locked = await cursor.fetchone()
-                if locked is None:
-                    raise LookupError("approval not found")
-                current_status = str(locked[0])
-                if current_status != "pending":
-                    if (
-                        current_status != command.status
-                        or str(locked[7]) != command.decided_by_type
-                        or str(locked[8]) != command.decided_by_id
-                        or str(locked[9]) != command.reason
-                    ):
-                        raise ApprovalConflictError("approval already has a different decision")
-                    return await self._load_approval(
-                        cursor, command.workspace_id, str(locked[1]), str(locked[5])
-                    )
-                await cursor.execute(
-                    DECIDE_APPROVAL_SQL,
-                    (
-                        command.status,
-                        command.reason,
-                        command.decided_by_type,
-                        command.decided_by_id,
-                        command.decided_at,
-                        command.approval_id,
-                        command.workspace_id,
-                    ),
-                )
-                row = await cursor.fetchone()
-                if row is None:
-                    raise ApprovalConflictError("approval transition conflict")
-                approval = _approval(row)
-                await cursor.execute(LOCK_WAITING_TARGET_SQL, (str(locked[2]), str(locked[1])))
-                target = await cursor.fetchone()
-                if target is None:
-                    raise LookupError("approval waiting target not found")
-                step_status, run_status = str(target[0]), str(target[1])
-                if step_status != "waiting_approval" or run_status != "waiting_approval":
-                    # Legacy/non-waiting approvals retain their decision fact only.
-                    return approval
-                if command.status == "rejected":
-                    error = _json(
-                        {
-                            "category": "policy_blocked",
-                            "message": "external approval was rejected",
-                            "approval_id": approval.id,
-                        }
-                    )
-                    await cursor.execute(
-                        FAIL_REJECTED_STEP_SQL,
-                        (error, command.decided_at, command.decided_at, approval.step_id),
-                    )
-                    if await _rowcount(cursor) != 1:
-                        raise ApprovalConflictError("approval waiting step transition conflict")
-                    await cursor.execute(
-                        FAIL_REJECTED_RUN_SQL, (command.decided_at, approval.run_id)
-                    )
-                    if await _rowcount(cursor) != 1:
-                        raise ApprovalConflictError("approval waiting run transition conflict")
-                    event_type = "agent.tool_approval.rejected"
-                else:
-                    try:
-                        continuation_json = prepare_approval_continuation(
-                            target[2], approval.id, approval.idempotency_key, command.status
-                        )
-                    except ValueError as error:
-                        raise ApprovalConflictError(str(error)) from error
-                    step_key = f"commit_patch:approval:{approval.id}"
-                    await cursor.execute(
-                        CREATE_APPROVED_STEP_SQL,
-                        (
-                            approval.run_id,
-                            step_key,
-                            _json(continuation_json),
-                        ),
-                    )
-                    await cursor.execute(GET_STEP_INPUT_SQL, (approval.run_id, step_key))
-                    continuation_row = await cursor.fetchone()
-                    if (
-                        continuation_row is None
-                        or str(continuation_row[0]) != "CommitPatch"
-                        or not same_json(continuation_row[1], continuation_json)
-                    ):
-                        raise ApprovalConflictError("approved continuation idempotency conflict")
-                    await cursor.execute(
-                        SUCCEED_APPROVAL_STEP_SQL,
-                        (command.decided_at, command.decided_at, approval.step_id),
-                    )
-                    if await _rowcount(cursor) != 1:
-                        raise ApprovalConflictError("approval waiting step transition conflict")
-                    await cursor.execute(
-                        QUEUE_APPROVAL_RUN_SQL,
-                        (step_key, command.decided_at, approval.run_id),
-                    )
-                    if await _rowcount(cursor) != 1:
-                        raise ApprovalConflictError("approval waiting run transition conflict")
-                    event_type = "agent.tool_approval.approved"
-                event_key = f"tool-approval-decided:{approval.id}"
-                await self.enqueue_outbox(
-                    cursor,
-                    "agent_tool_approval",
-                    approval.id,
-                    event_type,
-                    event_key,
-                    {
-                        "approval_id": approval.id,
-                        "run_id": approval.run_id,
-                        "tool_name": approval.tool_name,
-                        "status": command.status,
-                    },
-                )
+                approval = await self._decide_approval_tx(cursor, command)
             return approval
+
+    async def _decide_approval_tx(self, cursor: AsyncCursor, command: ApprovalDecision) -> Approval:
+        if command.decided_by_type != "user":
+            raise PermissionError("审批决定需要可信用户")
+        await cursor.execute(
+            AUTHORIZE_APPROVAL_DECISION_SQL,
+            (command.workspace_id, command.decided_by_id),
+        )
+        allowed = await cursor.fetchone()
+        if not allowed or not allowed[0]:
+            raise PermissionError("审批 决定 需要ctive 所有者 或 管理员")
+        await cursor.execute(LOCK_APPROVAL_SQL, (command.approval_id, command.workspace_id))
+        locked = await cursor.fetchone()
+        if locked is None:
+            raise LookupError("审批 未找到")
+        current_status = str(locked[0])
+        if current_status != "pending":
+            if (
+                current_status != command.status
+                or str(locked[7]) != command.decided_by_type
+                or str(locked[8]) != command.decided_by_id
+                or str(locked[9]) != command.reason
+            ):
+                raise ApprovalConflictError("审批 已经存在不同的 决定")
+            return await self._load_approval(
+                cursor, command.workspace_id, str(locked[1]), str(locked[5])
+            )
+        await cursor.execute(
+            DECIDE_APPROVAL_SQL,
+            (
+                command.status,
+                command.reason,
+                command.decided_by_type,
+                command.decided_by_id,
+                command.decided_at,
+                command.approval_id,
+                command.workspace_id,
+            ),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise ApprovalConflictError("审批 转换 冲突")
+        approval = _approval(row)
+        await cursor.execute(LOCK_WAITING_TARGET_SQL, (str(locked[2]), str(locked[1])))
+        target = await cursor.fetchone()
+        if target is None:
+            raise LookupError("审批 等待中 目标 未找到")
+        step_status, run_status = str(target[0]), str(target[1])
+        if step_status != "waiting_approval" or run_status != "waiting_approval":
+            return approval
+        if command.status == "rejected":
+            error = _json(
+                {
+                    "category": "policy_blocked",
+                    "message": "外部审批已被拒绝",
+                    "approval_id": approval.id,
+                }
+            )
+            await cursor.execute(
+                FAIL_REJECTED_STEP_SQL,
+                (error, command.decided_at, command.decided_at, approval.step_id),
+            )
+            if await _rowcount(cursor) != 1:
+                raise ApprovalConflictError("审批 等待中 步骤 转换 冲突")
+            await cursor.execute(FAIL_REJECTED_RUN_SQL, (command.decided_at, approval.run_id))
+            if await _rowcount(cursor) != 1:
+                raise ApprovalConflictError("审批 等待中 运行 转换 冲突")
+            event_type = "agent.tool_approval.rejected"
+        else:
+            try:
+                continuation_json = prepare_approval_continuation(
+                    target[2], approval.id, approval.idempotency_key, command.status
+                )
+            except ValueError as error:
+                raise ApprovalConflictError(str(error)) from error
+            step_key = f"commit_patch:approval:{approval.id}"
+            await cursor.execute(
+                CREATE_APPROVED_STEP_SQL,
+                (approval.run_id, step_key, _json(continuation_json)),
+            )
+            await cursor.execute(GET_STEP_INPUT_SQL, (approval.run_id, step_key))
+            continuation_row = await cursor.fetchone()
+            if (
+                continuation_row is None
+                or str(continuation_row[0]) != "CommitPatch"
+                or not same_json(continuation_row[1], continuation_json)
+            ):
+                raise ApprovalConflictError("已批准 后续步骤 幂等 冲突")
+            await cursor.execute(
+                SUCCEED_APPROVAL_STEP_SQL,
+                (command.decided_at, command.decided_at, approval.step_id),
+            )
+            if await _rowcount(cursor) != 1:
+                raise ApprovalConflictError("审批 等待中 步骤 转换 冲突")
+            await cursor.execute(
+                QUEUE_APPROVAL_RUN_SQL, (step_key, command.decided_at, approval.run_id)
+            )
+            if await _rowcount(cursor) != 1:
+                raise ApprovalConflictError("审批 等待中 运行 转换 冲突")
+            event_type = "agent.tool_approval.approved"
+        event_key = f"tool-approval-decided:{approval.id}"
+        await self.enqueue_outbox(
+            cursor,
+            "agent_tool_approval",
+            approval.id,
+            event_type,
+            event_key,
+            {
+                "approval_id": approval.id,
+                "run_id": approval.run_id,
+                "tool_name": approval.tool_name,
+                "status": command.status,
+            },
+        )
+        return approval
 
     @staticmethod
     async def _load_approval(
@@ -995,7 +1031,7 @@ class RuntimeRepository:
         await cursor.execute(GET_APPROVAL_SQL, (workspace_id, run_id, key))
         row = await cursor.fetchone()
         if row is None:
-            raise RuntimeError("approval replay lookup returned no row")
+            raise RuntimeError("审批 重放 查询 未返回数据行")
         return _approval(row)
 
     async def create_context_manifest(
@@ -1021,7 +1057,7 @@ class RuntimeRepository:
             or total_tokens < 0
             or total_tokens + reserved_output_tokens > token_budget
         ):
-            raise ValueError("invalid context token budget")
+            raise ValueError("无效的 上下文 令牌 预算")
         async with self._pool.connection() as connection, connection.cursor() as cursor:
             await cursor.execute(
                 CREATE_CONTEXT_MANIFEST_SQL,
@@ -1039,7 +1075,7 @@ class RuntimeRepository:
             row = await cursor.fetchone()
             await connection.commit()
         if row is None:
-            raise RuntimeError("context manifest insert returned no row")
+            raise RuntimeError("上下文 清单 写入 未返回数据行")
         return _manifest(row)
 
     async def get_context_manifest(self, manifest_id: str) -> ContextManifest | None:
@@ -1076,10 +1112,10 @@ class RuntimeRepository:
             )
             row = await cursor.fetchone()
         if row is None:
-            raise RuntimeError("outbox idempotency lookup returned no row")
+            raise RuntimeError("发件箱 幂等 查询 未返回数据行")
         value = _outbox(row)
         if value.event_type != event_type or not same_json(value.payload, payload):
-            raise IdempotencyConflictError("outbox idempotency conflict")
+            raise IdempotencyConflictError("发件箱 幂等 冲突")
         return value
 
     async def claim_outbox(
@@ -1091,7 +1127,7 @@ class RuntimeRepository:
         event_types: Sequence[str] = (),
     ) -> list[Outbox]:
         if not 0 < limit <= 1000:
-            raise ValueError("outbox limit must be 1..1000")
+            raise ValueError("发件箱 限制 必须是 1..1000")
         types = list(dict.fromkeys(item.strip() for item in event_types if item.strip()))
         type_arg: list[str] | None = types or None
         async with self._pool.connection() as connection, connection.cursor() as cursor:
@@ -1146,7 +1182,7 @@ class RuntimeRepository:
                 ),
             )
             if await _rowcount(cursor) != 1:
-                raise LeaseLostError("outbox lease lost")
+                raise LeaseLostError("发件箱 租约 已丢失")
             await connection.commit()
 
     async def recover_expired_outbox(self, now: datetime) -> int:
@@ -1191,11 +1227,11 @@ class RuntimeRepository:
             if row is not None:
                 return _tool(row), True
             if not idempotency_key:
-                raise IdempotencyConflictError("tool insert conflicted without idempotency key")
+                raise IdempotencyConflictError("工具写入发生冲突且没有幂等键")
             await cursor.execute(LOCK_TOOL_BY_KEY_SQL, (run_id, idempotency_key))
             row = await cursor.fetchone()
             if row is None:
-                raise RuntimeError("tool idempotency lookup returned no row")
+                raise RuntimeError("工具 幂等 查询 未返回数据行")
             value = _tool(row)
             if (
                 value.step_id != step_id
@@ -1203,7 +1239,7 @@ class RuntimeRepository:
                 or value.tool_version != tool_version
                 or not same_json(value.input, input)
             ):
-                raise IdempotencyConflictError("tool idempotency conflict")
+                raise IdempotencyConflictError("工具 幂等 冲突")
             if value.status in {ToolStatus.PENDING, ToolStatus.RUNNING} and (
                 value.status == ToolStatus.PENDING
                 or value.lease_expires_at is None
@@ -1221,9 +1257,25 @@ class RuntimeRepository:
                 )
                 reclaimed = await cursor.fetchone()
                 if reclaimed is None:
-                    raise LeaseLostError("tool reclaim lost")
+                    raise LeaseLostError("工具 回收 已丢失")
                 return _tool(reclaimed), True
             return value, False
+
+    async def get_tool_by_id(self, tool_id: str) -> Tool | None:
+        if not tool_id.strip() or tool_id != tool_id.strip():
+            raise ValueError("工具 ID 为必填项")
+        async with self._pool.connection() as connection, connection.cursor() as cursor:
+            await cursor.execute(GET_TOOL_BY_ID_SQL, (tool_id,))
+            row = await cursor.fetchone()
+        return None if row is None else _tool(row)
+
+    async def get_approval_by_id(self, approval_id: str) -> Approval | None:
+        if not approval_id.strip() or approval_id != approval_id.strip():
+            raise ValueError("审批 ID 为必填项")
+        async with self._pool.connection() as connection, connection.cursor() as cursor:
+            await cursor.execute(GET_APPROVAL_BY_ID_SQL, (approval_id,))
+            row = await cursor.fetchone()
+        return None if row is None else _approval(row)
 
     async def finish_tool(
         self,
@@ -1237,15 +1289,15 @@ class RuntimeRepository:
         attempts: int = 1,
     ) -> None:
         if latency_ms < 0 or attempts < 0:
-            raise ValueError("tool attempts and latency must be nonnegative")
+            raise ValueError("工具 尝试 和 延迟 必须为非负数")
         if status is ToolStatus.SUCCEEDED:
             if output is None or error is not None or error_category is not None:
-                raise ValueError("successful tool outcome requires output only")
+                raise ValueError("成功 工具 结果 需要 输出 仅")
         elif status in {ToolStatus.FAILED, ToolStatus.CANCELLED}:
             if output is not None or error is None or not error_category:
-                raise ValueError("failed tool outcome requires classified error only")
+                raise ValueError("失败的工具 结果 需要 已分类 错误 仅")
         else:
-            raise ValueError("tool outcome must be terminal")
+            raise ValueError("工具 结果 必须是 终态")
         async with self._pool.connection() as connection, connection.cursor() as cursor:
             await cursor.execute(
                 FINISH_TOOL_SQL,
@@ -1264,14 +1316,14 @@ class RuntimeRepository:
                 ),
             )
             if await _rowcount(cursor) != 1:
-                raise LeaseLostError("tool lease lost")
+                raise LeaseLostError("工具 租约 已丢失")
             await connection.commit()
 
     async def _execute_lease_free(self, query: str, params: Sequence[object], label: str) -> None:
         async with self._pool.connection() as connection, connection.cursor() as cursor:
             await cursor.execute(query, params)
             if await _rowcount(cursor) != 1:
-                raise LeaseLostError(f"{label} update did not match one fact")
+                raise LeaseLostError(f"{label}更新 与预期不匹配 一个 事实")
             await connection.commit()
 
     async def _outcome_already_exists(self, cursor: AsyncCursor, command: OutcomeCommit) -> bool:
@@ -1311,18 +1363,18 @@ class RuntimeRepository:
             or not command.request_id.strip()
             or not command.resource_id.strip()
         ):
-            raise ValueError("trusted run scope and request id are required")
+            raise ValueError("可信 运行 范围 和 请求 id 为必填项")
         if not command.objective.strip() or command.max_steps < 1 or command.max_tool_calls < 0:
-            raise ValueError("run objective and limits are invalid")
+            raise ValueError("运行 目标 和 限制 无效")
         if command.token_budget is not None and command.token_budget <= 0:
-            raise ValueError("token_budget must be positive")
+            raise ValueError("token_budget 必须为正数")
         if command.cost_budget is not None and command.cost_budget < 0:
-            raise ValueError("cost_budget must be nonnegative")
+            raise ValueError("cost_budget 必须为非负数")
 
 
 async def _rowcount(cursor: AsyncCursor) -> int:
-    # Psycopg exposes rowcount; the injected test cursor may expose it as a
-    # synchronous integer. No fallback state is used as an authority.
+    # Psycopg 暴露 rowcount；注入的测试游标可能直接提供同步整数。
+    # 不使用回退状态作为权威来源。
     value = getattr(cursor, "rowcount", -1)
     return int(value)
 

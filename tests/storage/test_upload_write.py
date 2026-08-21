@@ -129,6 +129,10 @@ class Pool:
         return self.connection_value
 
 
+async def noop_before_commit() -> None:
+    return None
+
+
 @pytest.mark.asyncio
 async def test_persist_upload_creates_one_owned_fact_graph_in_one_transaction() -> None:
     pool = Pool()
@@ -167,7 +171,8 @@ async def test_persist_upload_creates_one_owned_fact_graph_in_one_transaction() 
             message_kind="session_file",
             message_payload=payload,
             error_message=None,
-        )
+        ),
+        noop_before_commit,
     )
 
     assert pool.connection_value.transaction_entries == 1
@@ -265,7 +270,8 @@ async def test_any_upload_fact_failure_rolls_back_the_whole_transaction(
                 message_kind="session_file",
                 message_payload={"status": "ready"},
                 error_message=None,
-            )
+            ),
+            noop_before_commit,
         )
 
     assert pool.connection_value.transaction_entries == 1
@@ -303,7 +309,8 @@ async def test_existing_session_upload_locks_the_exact_workspace_before_writing(
             message_kind="session_file",
             message_payload={"status": "ready"},
             error_message=None,
-        )
+        ),
+        noop_before_commit,
     )
 
     executions = pool.connection_value.cursor_value.executions
@@ -315,7 +322,15 @@ async def test_existing_session_upload_locks_the_exact_workspace_before_writing(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "field",
-    ["resource_id", "version_id", "file_id", "session_id", "message_id"],
+    [
+        "workspace_id",
+        "principal_id",
+        "resource_id",
+        "version_id",
+        "file_id",
+        "session_id",
+        "message_id",
+    ],
 )
 async def test_repository_rejects_non_uuid_fact_ids_before_opening_a_transaction(
     field: str,
@@ -349,7 +364,48 @@ async def test_repository_rejects_non_uuid_fact_ids_before_opening_a_transaction
     )
 
     with pytest.raises(ValueError, match="UUID"):
-        await repository.persist_upload(replace(request, **{field: "not-a-uuid"}))
+        await repository.persist_upload(
+            replace(request, **{field: "not-a-uuid"}), noop_before_commit
+        )
+
+    assert pool.connection_value.transaction_entries == 0
+    assert pool.connection_value.cursor_value.executions == []
+
+
+@pytest.mark.asyncio
+async def test_repository_rejects_unknown_principal_type_before_opening_a_transaction() -> None:
+    pool = Pool()
+    repository = UploadMetadataRepository(pool)
+
+    with pytest.raises(ValueError, match="principal type"):
+        await repository.persist_upload(
+            UploadWriteRequest(
+                workspace_id=WORKSPACE_ID,
+                principal_type="admin",
+                principal_id=PRINCIPAL_ID,
+                create_session=True,
+                session_id=SESSION_ID,
+                session_title="Review",
+                resource_id=RESOURCE_ID,
+                version_id=VERSION_ID,
+                resource_title="Review",
+                resource_content="Body",
+                file_id=FILE_ID,
+                file_name="review.md",
+                content_type="text/markdown",
+                stored=StoredFile(
+                    sha256="a" * 64,
+                    size_bytes=4,
+                    storage_key="aa/" + "a" * 64,
+                    created=True,
+                ),
+                message_id=MESSAGE_ID,
+                message_kind="session_file",
+                message_payload={"status": "ready"},
+                error_message=None,
+            ),
+            noop_before_commit,
+        )
 
     assert pool.connection_value.transaction_entries == 0
     assert pool.connection_value.cursor_value.executions == []
@@ -385,7 +441,8 @@ async def test_parser_failure_facts_commit_without_a_partial_resource_graph() ->
             message_kind="system",
             message_payload={"content": "文件导入失败", "level": "error"},
             error_message="文件导入失败",
-        )
+        ),
+        noop_before_commit,
     )
 
     executions = pool.connection_value.cursor_value.executions
@@ -431,9 +488,63 @@ async def test_transaction_commit_failure_exposes_no_committed_fact_graph() -> N
                 message_kind="session_file",
                 message_payload={"status": "ready"},
                 error_message=None,
-            )
+            ),
+            noop_before_commit,
         )
 
     assert pool.connection_value.transaction_entries == 1
     assert pool.connection_value.committed is False
     assert pool.connection_value.rolled_back is True
+
+
+@pytest.mark.asyncio
+async def test_file_publication_failure_rolls_back_after_all_facts_are_written() -> None:
+    pool = Pool()
+    repository = UploadMetadataRepository(pool)
+    observed_queries: set[str] = set()
+
+    async def fail_publication() -> None:
+        observed_queries.update(
+            query for query, _params in pool.connection_value.cursor_value.executions
+        )
+        raise OSError("rename failed")
+
+    with pytest.raises(OSError, match="rename failed"):
+        await repository.persist_upload(
+            UploadWriteRequest(
+                workspace_id=WORKSPACE_ID,
+                principal_type="user",
+                principal_id=PRINCIPAL_ID,
+                create_session=True,
+                session_id=SESSION_ID,
+                session_title="Review",
+                resource_id=RESOURCE_ID,
+                version_id=VERSION_ID,
+                resource_title="Review",
+                resource_content="Body",
+                file_id=FILE_ID,
+                file_name="review.md",
+                content_type="text/markdown",
+                stored=StoredFile(
+                    sha256="a" * 64,
+                    size_bytes=4,
+                    storage_key="aa/" + "a" * 64,
+                ),
+                message_id=MESSAGE_ID,
+                message_kind="session_file",
+                message_payload={"status": "ready"},
+                error_message=None,
+            ),
+            fail_publication,
+        )
+
+    assert observed_queries == {
+        INSERT_SESSION_SQL,
+        INSERT_RESOURCE_SQL,
+        INSERT_RESOURCE_VERSION_SQL,
+        INSERT_UPLOADED_FILE_SQL,
+        INSERT_MESSAGE_SQL,
+        UPDATE_SESSION_TIMESTAMP_SQL,
+    }
+    assert pool.connection_value.rolled_back is True
+    assert pool.connection_value.committed is False

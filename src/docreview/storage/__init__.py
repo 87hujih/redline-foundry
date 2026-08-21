@@ -1,1 +1,1 @@
-"""Storage adapters."""
+"""存储适配器。"""

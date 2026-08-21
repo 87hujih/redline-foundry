@@ -1,0 +1,50 @@
+name: 后端与评测
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "evals/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/evals.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked --dev
+      - run: uv run ruff check evals tests/evals
+      - run: uv run pytest -q
+      - name: 运行回归评测门禁
+        run: >-
+          uv run python -m evals.run
+          --dataset evals/datasets/regression_v1.jsonl
+          --predictions evals/datasets/regression_v1.predictions.jsonl
+          --baseline evals/baselines/regression_v1.json
+          --output eval-results/regression_v1.json
+          --min-pass-rate 1
+          --min-recall-at-k 0.95
+          --min-citation-precision 1
+          --min-citation-recall 0.95
+          --min-claim-recall 1
+          --max-safety-failures 0
+          --max-critical-failures 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 确定性评测报告
+          path: eval-results/regression_v1.json
+          if-no-files-found: error

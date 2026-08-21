@@ -1,4 +1,4 @@
-"""Deterministic block-to-section normalization used by ingestion."""
+"""导入阶段使用的确定性 block 到 section 规范化。"""
 
 from __future__ import annotations
 

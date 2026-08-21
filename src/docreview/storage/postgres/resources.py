@@ -1,4 +1,4 @@
-"""Workspace-scoped read methods used by the resource HTTP routes."""
+"""资源 HTTP 路由使用的 Workspace-scoped 读取方法。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 from datetime import datetime
 from typing import Any, Protocol, cast
 
+from docreview.knowledge.chunking import REVIEW_STRUCTURE_PROFILE
 from docreview.storage.models import Resource, ResourceVersion, SearchChunk, SearchSection
 
 LIST_RESOURCES_SQL = """
@@ -18,6 +19,19 @@ ORDER BY created_at DESC
 GET_RESOURCE_SQL = """
 SELECT id::text, title, source_type, created_at
 FROM resources
+WHERE id = %s AND workspace_id = %s
+"""
+
+CLEAR_RESOURCE_SELECTIONS_SQL = """
+UPDATE assistant_sessions
+SET selected_resource_id = NULL,
+    resource_selected_at = NULL,
+    updated_at = now()
+WHERE workspace_id = %s AND selected_resource_id = %s
+"""
+
+DELETE_RESOURCE_SQL = """
+DELETE FROM resources
 WHERE id = %s AND workspace_id = %s
 """
 
@@ -42,7 +56,9 @@ SELECT {_SEARCH_CHUNK_COLUMNS}
 FROM resource_chunks AS chunk
 JOIN resource_versions AS version ON version.id = chunk.version_id
 JOIN resources AS resource ON resource.id = version.resource_id
+JOIN canonical_documents AS canonical ON canonical.version_id = version.id
 WHERE resource.workspace_id = %s AND version.id = %s
+  AND canonical.chunk_profile = %s AND chunk.chunk_profile = %s
 ORDER BY chunk.embedding <=> %s::vector
 LIMIT %s
 """
@@ -52,7 +68,9 @@ SELECT {_SEARCH_CHUNK_COLUMNS}
 FROM resource_chunks AS chunk
 JOIN resource_versions AS version ON version.id = chunk.version_id
 JOIN resources AS resource ON resource.id = version.resource_id
+JOIN canonical_documents AS canonical ON canonical.version_id = version.id
 WHERE resource.workspace_id = %s AND version.id = %s
+  AND canonical.chunk_profile = %s AND chunk.chunk_profile = %s
   AND (
     lower(coalesce(chunk.section_title, '') || ' ' || chunk.content) LIKE '%%' || %s || '%%'
     OR lower(coalesce(chunk.section_title, '') || ' ' || chunk.content) %% %s
@@ -82,7 +100,9 @@ SELECT {_SEARCH_CHUNK_COLUMNS}
 FROM resource_chunks AS chunk
 JOIN resource_versions AS version ON version.id = chunk.version_id
 JOIN resources AS resource ON resource.id = version.resource_id
+JOIN canonical_documents AS canonical ON canonical.version_id = version.id
 WHERE resource.workspace_id = %s AND version.id = %s
+  AND canonical.chunk_profile = %s AND chunk.chunk_profile = %s
 ORDER BY chunk.chunk_index, chunk.created_at
 """
 
@@ -94,6 +114,9 @@ class AsyncCursor(Protocol):
 
     async def fetchall(self) -> list[tuple[object, ...]]: ...
 
+    @property
+    def rowcount(self) -> int: ...
+
     async def __aenter__(self) -> AsyncCursor: ...
 
     async def __aexit__(self, *args: object) -> None: ...
@@ -101,6 +124,8 @@ class AsyncCursor(Protocol):
 
 class AsyncConnection(Protocol):
     def cursor(self) -> AsyncCursor: ...
+
+    def transaction(self) -> Any: ...
 
     async def __aenter__(self) -> AsyncConnection: ...
 
@@ -211,8 +236,13 @@ def _section(row: tuple[object, ...]) -> SearchSection:
 
 
 class ResourceRepository:
-    def __init__(self, pool: AsyncPool) -> None:
+    def __init__(
+        self, pool: AsyncPool, *, chunk_profile: str = REVIEW_STRUCTURE_PROFILE.profile_id
+    ) -> None:
+        if chunk_profile != REVIEW_STRUCTURE_PROFILE.profile_id:
+            raise ValueError("资源 搜索 需要 该 有效 结构化 切块 配置档")
         self._pool = pool
+        self._chunk_profile = chunk_profile
 
     async def list(self, workspace_id: str) -> list[Resource]:
         async with self._pool.connection() as connection, connection.cursor() as cursor:
@@ -226,6 +256,16 @@ class ResourceRepository:
             row = await cursor.fetchone()
         return None if row is None else _resource(row)
 
+    async def delete(self, workspace_id: str, resource_id: str) -> bool:
+        async with (
+            self._pool.connection() as connection,
+            connection.transaction(),
+            connection.cursor() as cursor,
+        ):
+            await cursor.execute(CLEAR_RESOURCE_SELECTIONS_SQL, (workspace_id, resource_id))
+            await cursor.execute(DELETE_RESOURCE_SQL, (resource_id, workspace_id))
+            return int(getattr(cursor, "rowcount", 0)) > 0
+
     async def get_current_version(
         self, workspace_id: str, resource_id: str
     ) -> ResourceVersion | None:
@@ -237,7 +277,7 @@ class ResourceRepository:
     async def search_chunks_by_version(
         self, workspace_id: str, version_id: str, vector: str, limit: int
     ) -> list[SearchChunk]:
-        params = (workspace_id, version_id, vector, limit)
+        params = (workspace_id, version_id, self._chunk_profile, self._chunk_profile, vector, limit)
         async with self._pool.connection() as connection, connection.cursor() as cursor:
             await cursor.execute(SEARCH_CHUNKS_BY_VERSION_SQL, params)
             rows = await cursor.fetchall()
@@ -249,7 +289,17 @@ class ResourceRepository:
         normalized = query.strip().lower()
         if not normalized or limit <= 0:
             return []
-        params = (workspace_id, version_id, normalized, normalized, normalized, normalized, limit)
+        params = (
+            workspace_id,
+            version_id,
+            self._chunk_profile,
+            self._chunk_profile,
+            normalized,
+            normalized,
+            normalized,
+            normalized,
+            limit,
+        )
         async with self._pool.connection() as connection, connection.cursor() as cursor:
             await cursor.execute(SEARCH_CHUNKS_LEXICAL_BY_VERSION_SQL, params)
             rows = await cursor.fetchall()
@@ -265,12 +315,17 @@ class ResourceRepository:
 
     async def list_chunks_by_version(self, workspace_id: str, version_id: str) -> list[SearchChunk]:
         async with self._pool.connection() as connection, connection.cursor() as cursor:
-            await cursor.execute(LIST_CHUNKS_BY_VERSION_SQL, (workspace_id, version_id))
+            await cursor.execute(
+                LIST_CHUNKS_BY_VERSION_SQL,
+                (workspace_id, version_id, self._chunk_profile, self._chunk_profile),
+            )
             rows = await cursor.fetchall()
         return [_chunk(row) for row in rows]
 
 
 __all__ = [
+    "CLEAR_RESOURCE_SELECTIONS_SQL",
+    "DELETE_RESOURCE_SQL",
     "GET_CURRENT_VERSION_SQL",
     "GET_RESOURCE_SQL",
     "LIST_CHUNKS_BY_VERSION_SQL",

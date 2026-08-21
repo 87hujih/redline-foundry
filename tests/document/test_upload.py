@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,9 +10,9 @@ from uuid import UUID
 
 import pytest
 
-from docreview.document.parser import DocumentParser
+from docreview.document.parser import DocumentParser, ParsedDocument
 from docreview.document.upload import DocumentUploadService, UploadCompensationError
-from docreview.storage.filestore import LocalFileStore
+from docreview.storage.filestore import LocalFileStore, StagedFile, StoredFile
 from docreview.storage.models import AssistantMessage, AssistantSession, Resource, ResourceVersion
 from docreview.storage.postgres.upload_write import UploadWriteRequest, UploadWriteResult
 
@@ -23,49 +25,56 @@ NOW = datetime(2026, 8, 14, 12, 0, tzinfo=UTC)
 class MetadataWriter:
     request: UploadWriteRequest | None = None
 
-    async def persist_upload(self, request: UploadWriteRequest) -> UploadWriteResult:
+    async def persist_upload(
+        self, request: UploadWriteRequest, before_commit: Callable[[], Awaitable[None]]
+    ) -> UploadWriteResult:
         self.request = request
-        resource = (
-            None
-            if request.resource_id is None
-            else Resource(request.resource_id, str(request.resource_title), "upload", NOW)
+        await before_commit()
+        return result_for(request)
+
+
+def result_for(request: UploadWriteRequest) -> UploadWriteResult:
+    resource = (
+        None
+        if request.resource_id is None
+        else Resource(request.resource_id, str(request.resource_title), "upload", NOW)
+    )
+    version = (
+        None
+        if request.version_id is None or request.resource_id is None
+        else ResourceVersion(
+            request.version_id,
+            request.resource_id,
+            1,
+            str(request.resource_content),
+            "assistant_upload",
+            NOW,
         )
-        version = (
-            None
-            if request.version_id is None or request.resource_id is None
-            else ResourceVersion(
-                request.version_id,
-                request.resource_id,
+    )
+    return UploadWriteResult(
+        session=AssistantSession(
+            request.session_id,
+            request.session_title,
+            False,
+            NOW,
+            NOW,
+            NOW,
+        ),
+        resource=resource,
+        version=version,
+        file_id=request.file_id,
+        messages=[
+            AssistantMessage(
+                request.message_id,
+                "assistant",
+                request.message_kind,
+                request.message_payload,
                 1,
-                str(request.resource_content),
-                "assistant_upload",
                 NOW,
             )
-        )
-        return UploadWriteResult(
-            session=AssistantSession(
-                request.session_id,
-                request.session_title,
-                False,
-                NOW,
-                NOW,
-                NOW,
-            ),
-            resource=resource,
-            version=version,
-            file_id=request.file_id,
-            messages=[
-                AssistantMessage(
-                    request.message_id,
-                    "assistant",
-                    request.message_kind,
-                    request.message_payload,
-                    1,
-                    NOW,
-                )
-            ],
-            error_message=request.error_message,
-        )
+        ],
+        error_message=request.error_message,
+    )
 
 
 class FailingTika:
@@ -77,18 +86,53 @@ class FailingTika:
 class FailingMetadataWriter:
     request: UploadWriteRequest | None = None
 
-    async def persist_upload(self, request: UploadWriteRequest) -> UploadWriteResult:
+    async def persist_upload(
+        self, request: UploadWriteRequest, before_commit: Callable[[], Awaitable[None]]
+    ) -> UploadWriteResult:
+        del before_commit
         self.request = request
         raise RuntimeError("database transaction failed")
+
+
+@dataclass
+class CommitFailingMetadataWriter:
+    request: UploadWriteRequest | None = None
+
+    async def persist_upload(
+        self, request: UploadWriteRequest, before_commit: Callable[[], Awaitable[None]]
+    ) -> UploadWriteResult:
+        self.request = request
+        await before_commit()
+        raise RuntimeError("database transaction commit failed")
 
 
 @dataclass
 class CancellingMetadataWriter:
     request: UploadWriteRequest | None = None
 
-    async def persist_upload(self, request: UploadWriteRequest) -> UploadWriteResult:
+    async def persist_upload(
+        self, request: UploadWriteRequest, before_commit: Callable[[], Awaitable[None]]
+    ) -> UploadWriteResult:
         self.request = request
+        await before_commit()
         raise asyncio.CancelledError
+
+
+@dataclass
+class TransactionMetadataWriter:
+    request: UploadWriteRequest | None = None
+    rolled_back: bool = False
+
+    async def persist_upload(
+        self, request: UploadWriteRequest, before_commit: Callable[[], Awaitable[None]]
+    ) -> UploadWriteResult:
+        self.request = request
+        try:
+            await before_commit()
+        except BaseException:
+            self.rolled_back = True
+            raise
+        return result_for(request)
 
 
 @pytest.mark.asyncio
@@ -128,6 +172,10 @@ async def test_conversation_upload_returns_frozen_dto_with_owned_uuid_fact_graph
         )
     )
     assert request.resource_id is not None
+    assert request.canonical_document is not None
+    assert request.canonical_document.document_id == request.resource_id
+    assert request.canonical_document.version_id == request.version_id
+    assert request.canonical_document.content_hash.startswith("sha256:")
     assert request.message_payload == {
         "file_name": "review.md",
         "file_id": request.file_id,
@@ -136,7 +184,7 @@ async def test_conversation_upload_returns_frozen_dto_with_owned_uuid_fact_graph
         "source_type": "upload",
         "status": "ready",
     }
-    assert request.stored.created is True
+    assert request.stored.created is False
     assert await store.stat(request.stored.storage_key) == len(b"# Review\n\nBody")
 
     assert set(dto) == {"session", "resource", "messages", "error_message"}
@@ -192,10 +240,11 @@ async def test_parser_failure_persists_one_complete_failure_dto_and_no_resource(
     assert request.version_id is None
     assert request.resource_title is None
     assert request.resource_content is None
+    assert request.canonical_document is None
     assert request.message_kind == "system"
-    assert request.error_message == "文件导入失败：Tika 解析失败"  # noqa: RUF001
+    assert request.error_message == "文件导入失败：parser offline"  # noqa: RUF001
     assert request.message_payload == {
-        "content": "文件导入失败：Tika 解析失败",  # noqa: RUF001
+        "content": "文件导入失败：parser offline",  # noqa: RUF001
         "level": "error",
     }
     assert await store.stat(request.stored.storage_key) == len(b"%PDF-1.7")
@@ -219,13 +268,13 @@ async def test_parser_failure_persists_one_complete_failure_dto_and_no_resource(
                 "created_at": NOW,
             }
         ],
-        "error_message": "文件导入失败：Tika 解析失败",  # noqa: RUF001
+        "error_message": "文件导入失败：parser offline",  # noqa: RUF001
     }
 
 
 @pytest.mark.asyncio
 async def test_database_failure_removes_only_a_newly_created_file(tmp_path: Path) -> None:
-    metadata = FailingMetadataWriter()
+    metadata = CommitFailingMetadataWriter()
     store = LocalFileStore(tmp_path)
     service = DocumentUploadService(
         parser=DocumentParser(),
@@ -233,7 +282,7 @@ async def test_database_failure_removes_only_a_newly_created_file(tmp_path: Path
         metadata=metadata,
     )
 
-    with pytest.raises(RuntimeError, match="database transaction failed"):
+    with pytest.raises(RuntimeError, match="database transaction commit failed"):
         await service.upload_conversation(
             WORKSPACE_ID,
             "review.md",
@@ -243,7 +292,7 @@ async def test_database_failure_removes_only_a_newly_created_file(tmp_path: Path
         )
 
     request = metadata.request
-    assert request is not None and request.stored.created is True
+    assert request is not None and request.stored.created is False
     assert await store.stat(request.stored.storage_key) is None
 
 
@@ -251,7 +300,7 @@ async def test_database_failure_removes_only_a_newly_created_file(tmp_path: Path
 async def test_database_failure_keeps_a_preexisting_content_addressed_file(
     tmp_path: Path,
 ) -> None:
-    metadata = FailingMetadataWriter()
+    metadata = CommitFailingMetadataWriter()
     store = LocalFileStore(tmp_path)
     existing = await store.save(b"# Review\n\nBody")
     service = DocumentUploadService(
@@ -260,7 +309,7 @@ async def test_database_failure_keeps_a_preexisting_content_addressed_file(
         metadata=metadata,
     )
 
-    with pytest.raises(RuntimeError, match="database transaction failed"):
+    with pytest.raises(RuntimeError, match="database transaction commit failed"):
         await service.upload_conversation(
             WORKSPACE_ID,
             "review.md",
@@ -301,9 +350,9 @@ async def test_cancelled_database_transaction_removes_a_new_file(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_cleanup_failure_preserves_both_failure_causes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    metadata = FailingMetadataWriter()
+    metadata = CommitFailingMetadataWriter()
     store = LocalFileStore(tmp_path)
     service = DocumentUploadService(
         parser=DocumentParser(),
@@ -326,16 +375,20 @@ async def test_cleanup_failure_preserves_both_failure_causes(
         )
 
     assert isinstance(captured.value.upload_error, RuntimeError)
-    assert str(captured.value.upload_error) == "database transaction failed"
+    assert str(captured.value.upload_error) == "database transaction commit failed"
     assert isinstance(captured.value.cleanup_error, OSError)
     assert str(captured.value.cleanup_error) == "cleanup failed"
+    record = next(record for record in caplog.records if record.msg == "upload cleanup failed")
+    assert getattr(record, "event", None) == "assistant.upload.cleanup_failed"
+    assert getattr(record, "upload_error_type", None) == "RuntimeError"
+    assert getattr(record, "cleanup_error_type", None) == "OSError"
 
 
 @pytest.mark.asyncio
 async def test_file_publication_failure_never_starts_metadata_persistence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    metadata = MetadataWriter()
+    metadata = TransactionMetadataWriter()
     store = LocalFileStore(tmp_path)
     service = DocumentUploadService(
         parser=DocumentParser(),
@@ -343,12 +396,13 @@ async def test_file_publication_failure_never_starts_metadata_persistence(
         metadata=metadata,
     )
 
-    def fail_replace(source: Path, target: Path) -> Path:
+    def fail_replace(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+        del source, target
         raise OSError("disk write failed")
 
-    monkeypatch.setattr(Path, "replace", fail_replace)
+    monkeypatch.setattr(os, "replace", fail_replace)
 
-    with pytest.raises(OSError, match="disk write failed"):
+    with pytest.raises(Exception, match="disk write failed"):
         await service.upload_conversation(
             WORKSPACE_ID,
             "review.md",
@@ -357,5 +411,79 @@ async def test_file_publication_failure_never_starts_metadata_persistence(
             principal_id=PRINCIPAL_ID,
         )
 
-    assert metadata.request is None
+    assert metadata.request is not None
+    assert metadata.rolled_back is True
     assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
+
+
+@pytest.mark.asyncio
+async def test_failure_before_publication_cleans_staging_without_final_object(
+    tmp_path: Path,
+) -> None:
+    metadata = FailingMetadataWriter()
+    store = LocalFileStore(tmp_path / "objects")
+    service = DocumentUploadService(parser=DocumentParser(), store=store, metadata=metadata)
+
+    with pytest.raises(RuntimeError, match="database transaction failed"):
+        await service.upload_conversation(
+            WORKSPACE_ID,
+            "review.md",
+            b"# Review\n\nBody",
+            principal_type="user",
+            principal_id=PRINCIPAL_ID,
+        )
+
+    assert [path for path in store.root.rglob("*") if path.is_file()] == []
+
+
+@pytest.mark.asyncio
+async def test_upload_orders_staging_parse_transaction_publication_and_commit(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    class RecordingStore(LocalFileStore):
+        async def stage(self, content: bytes):
+            events.append("storage.stage")
+            return await super().stage(content)
+
+        async def promote(self, staged: StagedFile) -> StoredFile:
+            events.append("storage.promote")
+            return await super().promote(staged)
+
+    class RecordingParser(DocumentParser):
+        async def parse(self, file_name: str, content: bytes) -> ParsedDocument:
+            events.append("parser.parse")
+            return await super().parse(file_name, content)
+
+    class RecordingMetadata:
+        async def persist_upload(
+            self, request: UploadWriteRequest, before_commit: Callable[[], Awaitable[None]]
+        ) -> UploadWriteResult:
+            events.extend(["transaction.begin", "transaction.write_facts"])
+            await before_commit()
+            events.append("transaction.commit")
+            return result_for(request)
+
+    service = DocumentUploadService(
+        parser=RecordingParser(),
+        store=RecordingStore(tmp_path / "objects"),
+        metadata=RecordingMetadata(),
+    )
+
+    await service.upload_conversation(
+        WORKSPACE_ID,
+        "review.md",
+        b"# Review\n\nBody",
+        principal_type="user",
+        principal_id=PRINCIPAL_ID,
+    )
+
+    assert events == [
+        "storage.stage",
+        "parser.parse",
+        "transaction.begin",
+        "transaction.write_facts",
+        "storage.promote",
+        "transaction.commit",
+    ]

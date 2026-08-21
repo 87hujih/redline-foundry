@@ -1,4 +1,4 @@
-"""Explicit lifecycle ownership for durable Runtime and Projection workers."""
+"""持久化 Runtime 与 Projection worker 的显式生命周期所有权。"""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ class RuntimeWorker:
         self._engine = engine
 
     async def run(self, stop: asyncio.Event, poll_interval: timedelta) -> None:
+        # 重启后先回收过期 lease，再允许当前 worker 领取新任务。
         await self._engine.recover()
         while not stop.is_set():
             if not await self._engine.process_one():
@@ -35,30 +36,34 @@ class RuntimeLifecycle:
         runtime: Worker | None,
         projection: Worker | None,
         poll_interval: timedelta,
+        embedding: Worker | None = None,
     ) -> None:
         if runtime is None or projection is None:
             raise ValueError("both runtime and projection workers are required")
         if poll_interval <= timedelta(0):
-            raise ValueError("worker poll interval must be positive")
+            raise ValueError("工作进程 轮询 间隔 必须为正数")
         self.runtime = runtime
         self.projection = projection
+        self.embedding = embedding
         self.poll_interval = poll_interval
         self.started = False
         self._stop = asyncio.Event()
-        self._tasks: tuple[asyncio.Task[None], asyncio.Task[None]] | None = None
+        self._tasks: tuple[asyncio.Task[None], ...] | None = None
 
     async def start(self) -> None:
         if self.started:
             return
         self._stop = asyncio.Event()
-        tasks = (
+        tasks = [
             asyncio.create_task(self.runtime.run(self._stop, self.poll_interval)),
             asyncio.create_task(self.projection.run(self._stop, self.poll_interval)),
-        )
-        self._tasks = tasks
+        ]
+        if self.embedding is not None:
+            tasks.append(asyncio.create_task(self.embedding.run(self._stop, self.poll_interval)))
+        self._tasks = tuple(tasks)
         self.started = True
-        # Worker recovery runs inside each task. Give fail-fast startup errors one
-        # scheduling turn so the sibling task can be stopped and joined.
+        # Worker recovery 在各自任务内运行。给快速失败的启动错误一个调度轮次，
+        # 以便停止并等待其他任务结束。
         await asyncio.sleep(0)
         failures: list[BaseException] = []
         for task in tasks:

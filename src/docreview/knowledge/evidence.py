@@ -1,6 +1,6 @@
-"""Versioned hybrid retrieval, degradation and citation/provenance contracts."""
+"""带版本的混合检索、降级与 citation/provenance 契约。"""
 
-# Candidate metadata is intentionally an extensible provenance map.
+# 候选元数据刻意保留为可扩展的来源信息映射。
 # pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false
 
 from __future__ import annotations
@@ -217,7 +217,7 @@ async def retrieve(
         or not query.strip()
         or not 0 < limit <= 50
     ):
-        raise ValueError("invalid retrieval request")
+        raise ValueError("无效的 检索 请求")
     result = EvidenceSet(
         workspace_id, resource_id, version_id, query.strip(), config.profile_version
     )
@@ -264,7 +264,7 @@ async def retrieve(
                 }
             )
     if not lexical and not semantic:
-        raise RuntimeError("all configured retrieval channels unavailable")
+        raise RuntimeError("全部 已配置的 检索 通道 不可用")
     result.evidence = _fuse(config, lexical, semantic)
     if config.rerank_enabled and reranker is not None and result.evidence:
         try:
@@ -298,7 +298,7 @@ async def retrieve(
                     {"stage": "rerank", "status": "succeeded", "output_count": len(selected)}
                 )
             else:
-                raise ValueError("invalid reranker response")
+                raise ValueError("无效的 重排序器 响应")
         except Exception:
             result.process.append(
                 {"stage": "rerank", "status": "degraded", "reason": "reranker_failed"}

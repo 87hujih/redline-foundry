@@ -1,0 +1,2 @@
+{"case_id":"smoke-001","question":"违约金如何计算？","expected_evidence":["node-penalty"],"expected_claims":["违约金按合同金额的5%计算"],"risk_level":"high","tags":["中文","金额"]}
+{"case_id":"smoke-002","question":"合同期限是什么？","expected_evidence":["node-term"],"expected_claims":["合同期限为12个月"],"tags":["中文","日期"]}

@@ -1,4 +1,4 @@
-"""Trusted principal and workspace boundaries."""
+"""可信 Principal 与 Workspace 边界。"""
 
 from docreview.identity.trusted_ingress import (
     IdentityRequest,

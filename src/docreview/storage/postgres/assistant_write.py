@@ -1,4 +1,4 @@
-"""Workspace-scoped assistant session/message write adapter used by uploads."""
+"""上传流程使用的 Workspace-scoped Assistant 会话/消息写入适配器。"""
 
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ class AssistantWriteRepository:
             await cursor.execute(CREATE_SESSION_SQL, (workspace_id, title))
             row = await cursor.fetchone()
             if row is None:
-                raise RuntimeError("assistant session insert returned no row")
+                raise RuntimeError("助手 会话 写入 未返回数据行")
             await connection.commit()
         return AssistantSession(
             str(row[0]),
@@ -79,7 +79,7 @@ class AssistantWriteRepository:
             row = await cursor.fetchone()
             if row is None:
                 await connection.rollback()
-                raise LookupError("assistant session not found")
+                raise LookupError("助手 会话 未找到")
             await connection.commit()
         return AssistantMessage(
             str(row[0]), role, kind, row[3], int(cast(int, row[4])), cast(datetime, row[5])

@@ -1,4 +1,4 @@
-"""Transport-neutral durable Turn facts."""
+"""与传输协议无关的持久化 Turn 事实。"""
 
 from __future__ import annotations
 

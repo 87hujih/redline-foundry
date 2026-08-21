@@ -1,4 +1,4 @@
-"""Public API error envelope."""
+"""公开 API 错误 envelope。"""
 
 from __future__ import annotations
 

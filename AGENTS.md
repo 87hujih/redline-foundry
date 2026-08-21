@@ -1,52 +1,65 @@
-# Python + LangGraph Rewrite Governance
+# AGENTS.md
 
-## Scope
+Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
 
-This repository is the Python + LangGraph rewrite target for `G:\gofile\Agent_Project`.
-The Go repository is read-only source evidence. All new Python code and governance
-documents belong in this repository only.
+**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
 
-The active scope is defined by the production `apps/server/cmd/server` assembly,
-the routes registered by the current Router, API calls that are actually reachable
-from `apps/web`, deployment/CI invocation evidence, and the durable request closure
-required to complete a request. Do not translate a Go package or directory merely
-because it exists.
+## 1. Think Before Coding
 
-## Source safety
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
 
-- Never modify, format, delete, stage, commit, or submit changes in
-  `G:\gofile\Agent_Project`.
-- Never read, print, copy, or infer values from `.env` files, API keys, tokens, or
-  database passwords. Configuration names may be documented; secret values may not.
-- Do not connect to PostgreSQL. Do not run migrations, DDL, backfills, reindexing,
-  repair, replay, destructive SQL, or commands that could perform them.
-- Preserve the source worktree exactly, including unrelated user changes.
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
 
-## Compatibility
+## 2. Simplicity First
 
-The Python service must preserve the current HTTP methods and paths, DTO shapes,
-error status/DTO behavior, SSE event names and replay semantics, `X-Request-ID`,
-`Last-Event-ID`, workspace/resource/principal isolation, database idempotency keys,
-lease-generation fencing, and transactional boundaries documented under
-`docs/remediation/`.
+**Minimum code that solves the problem. Nothing speculative.**
 
-LangGraph is an orchestration implementation detail. It does not replace durable
-Run/Step/Attempt/Tool/Approval/Commit/Outbox/Projection facts or their PostgreSQL
-transactions.
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
 
-## Delivery flow
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
 
-1. Freeze scope and contracts before implementing Python business logic.
-2. Add failure-path and compatibility tests before changing behavior where practical.
-3. Use the existing SQL and repository behavior as the compatibility oracle; do not
-   rewrite migration SQL without explicit approval.
-4. Verify with database-free tests and static checks. Any skipped database check must
-   state that the no-connection rule or test fuse prevented it.
-5. Keep every phase independently reviewable. Do not begin the next phase without
-   explicit user confirmation.
+## 3. Surgical Changes
 
-## Phase gate
+**Touch only what you must. Clean up only your own mess.**
 
-Phase 0 produces only governance and contract documents. It must stop before Python
-business implementation, database access, migration work, deployment changes, or Go
-source edits.
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+## 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+---
+
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

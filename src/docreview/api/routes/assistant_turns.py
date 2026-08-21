@@ -1,4 +1,4 @@
-"""Durable-only assistant message write and SSE adapters."""
+"""仅持久化的 Assistant 消息写入与 SSE 适配器。"""
 
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ async def _pipeline_request(request: Request, session_id: str | None) -> Pipelin
     after_sequence = _cursor(request)
     dependencies = _dependencies(request)
     if dependencies.turn_pipeline is None or dependencies.identity_adapter is None:
-        raise APIError(503, "durable agent runtime is unavailable")
+        raise APIError(503, "持久化 agent 运行时 不可用")
     if not request.headers.get(HEADER_SIGNATURE, "").strip():
         raise APIError(401, "durable identity is required")
     workspace_id = request.headers.get(HEADER_WORKSPACE_ID, "").strip()
@@ -94,9 +94,9 @@ async def _pipeline_request(request: Request, session_id: str | None) -> Pipelin
             workspace_id,
         )
     except UntrustedIdentityError as error:
-        raise APIError(401, "durable identity is not trusted") from error
+        raise APIError(401, "持久化 身份 不可信") from error
     if not scope.trusted or scope.workspace_id != workspace_id:
-        raise APIError(403, "durable workspace scope is not trusted")
+        raise APIError(403, "持久化 工作区 范围 不可信")
     return PipelineRequest(
         request_id=str(request.state.request_id),
         trace_id=str(request.state.request_id),
@@ -111,11 +111,11 @@ async def _pipeline_request(request: Request, session_id: str | None) -> Pipelin
 
 def _pipeline_error(error: Exception) -> APIError:
     if isinstance(error, TurnNotReadyError):
-        return APIError(503, "durable turn state is not ready; retry with the same request id")
+        return APIError(503, "持久化 轮次 状态 尚未就绪; 请使用相同请求 ID 重试")
     if isinstance(error, PermissionError):
-        return APIError(403, "durable workspace scope is not trusted")
-    # Frozen Go compatibility currently maps request hash conflicts and missing
-    # durable resource scope through the generic failure response.
+        return APIError(403, "持久化 工作区 范围 不可信")
+    # 当前冻结行为将 request hash 冲突和缺少持久化 resource scope
+    # 映射为通用失败响应。
     if isinstance(error, (IdempotencyConflictError, ValueError)):
         return APIError(500, "处理助手请求失败")
     return APIError(500, "处理助手请求失败")
@@ -125,7 +125,7 @@ async def _non_stream(request: Request, session_id: str | None, status_code: int
     pipeline_request = await _pipeline_request(request, session_id)
     pipeline = _dependencies(request).turn_pipeline
     if pipeline is None:
-        raise APIError(503, "durable agent runtime is unavailable")
+        raise APIError(503, "持久化 agent 运行时 不可用")
     try:
         result = await pipeline.execute(pipeline_request, None)
     except Exception as error:
@@ -137,7 +137,7 @@ async def _stream(request: Request, session_id: str | None) -> StreamingResponse
     pipeline_request = await _pipeline_request(request, session_id)
     pipeline = _dependencies(request).turn_pipeline
     if pipeline is None:
-        raise APIError(503, "durable agent runtime is unavailable")
+        raise APIError(503, "持久化 agent 运行时 不可用")
 
     async def body() -> AsyncIterator[str]:
         queue: asyncio.Queue[str] = asyncio.Queue()
@@ -145,6 +145,7 @@ async def _stream(request: Request, session_id: str | None) -> StreamingResponse
 
         async def observe(event: TurnEvent) -> None:
             nonlocal terminal
+            # SSE id 直接使用持久化 sequence；重连只按 Last-Event-ID 之后的事实 replay。
             for frame in event_frames(event):
                 terminal = terminal or frame.event in {"done", "error"}
                 await queue.put(render_frame(frame))
@@ -156,16 +157,14 @@ async def _stream(request: Request, session_id: str | None) -> StreamingResponse
                     await asyncio.wait({task}, timeout=0.01)
                     continue
                 yield await queue.get()
-            # Never let cancellation of the SSE observer propagate into the
-            # durable pipeline task that owns persisted Run progress.
+            # 不让 SSE observer 的取消传播到持有持久化 Run 进度的 pipeline task。
             result = await asyncio.shield(task)
             if not terminal:
                 yield render_frame(SSEFrame(pipeline_request.after_sequence, "done", {}))
             del result
         except asyncio.CancelledError:
-            # Acceptance and Runtime execution are durable database facts. A
-            # transport cancellation only detaches this observer; a reconnect
-            # with the same request id can replay the persisted outcome.
+            # 接受与 Runtime 执行都是持久化数据库事实。传输取消只会解除当前
+            # observer；使用相同 request id 重连即可 replay 持久化结果。
             task.add_done_callback(_consume_background_result)
             raise
         except Exception:
@@ -182,7 +181,7 @@ async def _stream(request: Request, session_id: str | None) -> StreamingResponse
 
 
 def _consume_background_result(task: asyncio.Task[object]) -> None:
-    """Retrieve a detached pipeline exception so it is not reported as unhandled."""
+    """取回脱离观察者的 pipeline 异常, 避免被报告为未处理异常。"""
 
     if not task.cancelled():
         task.exception()

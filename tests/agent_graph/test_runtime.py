@@ -182,3 +182,26 @@ async def test_executor_resumes_approval_checkpoint_into_commit_step() -> None:
     assert resumed.outcome is Outcome.CONTINUE
     assert resumed.next_steps[0].step_type == "CommitPatch"
     assert boundary.operations == []
+
+
+async def test_executor_invokes_graph_through_async_path() -> None:
+    state = GraphState(run_id="run-async", request_fact_id="request-async", budget=budget())
+
+    class AsyncOnlyGraph:
+        async def ainvoke(self, value: object, config: object) -> object:
+            del config
+            return value
+
+        def invoke(self, value: object, config: object) -> object:
+            del value, config
+            raise AssertionError("sync graph invocation must not be used")
+
+    executor = LangGraphExecutor(
+        AsyncOnlyGraph(),  # type: ignore[arg-type]
+        ProjectCheckpointer(InMemoryCheckpointRepository()),
+        Boundary(),
+    )
+
+    result = await executor.start(state)
+
+    assert result.state == state

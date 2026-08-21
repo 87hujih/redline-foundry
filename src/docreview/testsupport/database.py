@@ -1,7 +1,7 @@
-"""Fail-closed PostgreSQL test fuse.
+"""Fail-closed PostgreSQL 测试 fuse。
 
-This module is test support only. It never reads `.env` and never falls back to
-the production `DATABASE_URL`.
+本模块仅供测试支持，绝不读取 `.env`，也绝不回退到生产
+`DATABASE_URL`。
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pydantic import SecretStr
 
 
 class DatabaseTestFuseError(ValueError):
-    """Raised before any database connection factory can be called."""
+    """在任何数据库连接工厂调用前抛出。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,11 +39,11 @@ def load_test_database_config(
 ) -> TestDatabaseConfig:
     values = _values(environment)
     if values.get("ALLOW_DB_TESTS", "").strip() != "1":
-        raise DatabaseTestFuseError("ALLOW_DB_TESTS=1 is required")
+        raise DatabaseTestFuseError("必须设置 ALLOW_DB_TESTS=1")
 
     raw_dsn = values.get("TEST_DATABASE_URL", "").strip()
     if not raw_dsn:
-        raise DatabaseTestFuseError("TEST_DATABASE_URL is required; DATABASE_URL is never used")
+        raise DatabaseTestFuseError("必须设置 TEST_DATABASE_URL; 绝不使用 DATABASE_URL")
     try:
         connection_parameters = conninfo_to_dict(raw_dsn)
     except ProgrammingError as error:

@@ -1,0 +1,57 @@
+groups:
+  - name: docreview-python-capacity
+    rules:
+      - alert: DocReviewCapacityMetricsMissing
+        expr: >-
+          absent(docreview_runtime_queue_age_seconds)
+          or absent(docreview_runtime_lease_heartbeat_margin_seconds)
+          or absent(docreview_database_pool_in_use)
+          or absent(docreview_database_pool_size)
+          or absent(docreview_sse_connections)
+          or absent(docreview_outbox_lag_seconds)
+          or absent(docreview_projection_lag_seconds)
+          or absent(docreview_outbox_dead_letters)
+          or absent(docreview_reconciliation_mismatches{scope="historical"})
+        for: 2m
+        labels: { severity: critical, service: docreview-python }
+        annotations: { summary: "A required Python canary capacity or reconciliation metric is missing" }
+      - alert: DocReviewRuntimeQueueAgeHigh
+        expr: max(docreview_runtime_queue_age_seconds) > ${MAX_QUEUE_AGE_SECONDS}
+        for: 2m
+        labels: { severity: critical, service: docreview-python }
+        annotations: { summary: "Durable runtime queue age exceeded the approved canary limit" }
+      - alert: DocReviewLeaseHeartbeatMarginLow
+        expr: min(docreview_runtime_lease_heartbeat_margin_seconds) < ${MIN_LEASE_MARGIN_SECONDS}
+        for: 1m
+        labels: { severity: critical, service: docreview-python }
+        annotations: { summary: "Worker heartbeat margin is below the fencing safety limit" }
+      - alert: DocReviewDatabasePoolHeadroomLow
+        expr: (sum(docreview_database_pool_in_use) / sum(docreview_database_pool_size)) > ${MAX_POOL_UTILIZATION}
+        for: 2m
+        labels: { severity: critical, service: docreview-python }
+        annotations: { summary: "Database pool utilization exceeded the approved headroom limit" }
+      - alert: DocReviewSSEConnectionBudgetExceeded
+        expr: sum(docreview_sse_connections) > ${MAX_SSE_CONNECTIONS}
+        for: 1m
+        labels: { severity: critical, service: docreview-python }
+        annotations: { summary: "SSE connection count exceeded the staged capacity limit" }
+      - alert: DocReviewOutboxLagHigh
+        expr: max(docreview_outbox_lag_seconds) > ${MAX_OUTBOX_LAG_SECONDS}
+        for: 2m
+        labels: { severity: critical, service: docreview-python }
+        annotations: { summary: "Outbox publication lag exceeded the drain limit" }
+      - alert: DocReviewProjectionLagHigh
+        expr: max(docreview_projection_lag_seconds) > ${MAX_PROJECTION_LAG_SECONDS}
+        for: 2m
+        labels: { severity: critical, service: docreview-python }
+        annotations: { summary: "Public projection lag exceeded the replay limit" }
+      - alert: DocReviewDeadLetterPresent
+        expr: sum(docreview_outbox_dead_letters) > 0
+        for: 0m
+        labels: { severity: critical, service: docreview-python }
+        annotations: { summary: "A durable outbox event entered dead-letter state" }
+      - alert: DocReviewHistoricalReconciliationMismatch
+        expr: sum(docreview_reconciliation_mismatches{scope="historical"}) > 0
+        for: 0m
+        labels: { severity: critical, service: docreview-python }
+        annotations: { summary: "Historical tenant or durable fact reconciliation is not clean" }

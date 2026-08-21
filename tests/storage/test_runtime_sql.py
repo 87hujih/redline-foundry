@@ -65,6 +65,9 @@ def test_recovery_closes_attempts_and_requeues_or_fails_steps() -> None:
 
 def test_projection_reads_are_durable_scoped_and_receipts_idempotent() -> None:
     assert "run.runtime_mode = 'durable'" in normalized(LOAD_STEP_SNAPSHOT_SQL)
+    assert "outcome.id::text = step.output_json->>'outcome_fact_id'" in normalized(
+        LOAD_STEP_SNAPSHOT_SQL
+    )
     assert "run.turn_id is not null" in normalized(LOAD_REJECTED_APPROVAL_SNAPSHOT_SQL)
     assert "approval.status = 'rejected'" in normalized(LOAD_REJECTED_APPROVAL_SNAPSHOT_SQL)
     assert "on conflict (event_id, projection_name) do nothing" in normalized(RECEIPT_INSERT_SQL)

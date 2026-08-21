@@ -10,10 +10,9 @@ import pytest
 
 from docreview.document.commit import CommitResult, CommitSnapshot, StoredCommit, commit
 from docreview.document.ingestion import ingest
-from docreview.document.model import flatten
+from docreview.document.model import flatten, hash_node
 from docreview.document.parser import (
     DocumentParser,
-    ParserUnavailableError,
     UnsupportedFileTypeError,
 )
 from docreview.document.patch import Operation, PatchSet, parse_strict, patch_hash
@@ -46,11 +45,12 @@ def test_golden_ast_node_ids_hashes_chunks() -> None:
     ).document
     nodes = flatten(document.root)
     assert [node.node_id for node in nodes] == GOLDEN["document"]["node_ids"]
+    assert [hash_node(node) for node in nodes] == GOLDEN["document"]["node_hashes"]
     assert document.content_hash == GOLDEN["document"]["content_hash"]
     assert [chunk.content for chunk in build_chunks(document)] == GOLDEN["document"]["chunks"]
 
 
-def test_parser_boundaries_and_error_downgrade() -> None:
+def test_parser_boundaries_preserve_tika_error() -> None:
     parser = DocumentParser()
     with pytest.raises(UnsupportedFileTypeError):
         asyncio.run(parser.parse("contract.pdf", b"pdf"))
@@ -59,7 +59,7 @@ def test_parser_boundaries_and_error_downgrade() -> None:
         async def parse(self, file_name: str, content: bytes) -> str:
             raise TimeoutError
 
-    with pytest.raises(ParserUnavailableError):
+    with pytest.raises(TimeoutError):
         asyncio.run(DocumentParser(mode="tika", tika=BrokenTika()).parse("contract.pdf", b"pdf"))
 
 

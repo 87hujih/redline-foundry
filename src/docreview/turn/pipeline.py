@@ -1,4 +1,4 @@
-"""Single durable Turn pipeline shared by HTTP and SSE transports."""
+"""HTTP 与 SSE 传输共享的单一持久化 Turn pipeline。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from docreview.turn.models import Turn, TurnEvent, TurnRequest, TurnResult, Turn
 
 
 class TurnNotReadyError(TimeoutError):
-    """The accepted Turn has not reached a deterministic public projection."""
+    """已接受的 Turn 尚未到达确定性的公开 projection。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +74,7 @@ class DurableRunner:
         max_wait: float,
     ) -> None:
         if poll_interval <= 0 or max_wait <= 0:
-            raise ValueError("durable runner polling bounds must be positive")
+            raise ValueError("持久化 运行器 轮询边界 必须为正数")
         self._coordinator = coordinator
         self._projections = projections
         self._poll_interval = poll_interval
@@ -103,9 +103,7 @@ class DurableRunner:
                     turn=accepted.turn,
                 )
             if asyncio.get_running_loop().time() >= deadline:
-                raise TurnNotReadyError(
-                    "durable turn state is not ready; retry with the same request id"
-                )
+                raise TurnNotReadyError("持久化 轮次 状态 尚未就绪; 请使用相同请求 ID 重试")
 
             observed: list[TurnEvent] = []
 
@@ -148,7 +146,7 @@ class DurableRunner:
             or not scope.principal.type.strip()
             or not scope.principal.id.strip()
         ):
-            raise PermissionError("durable workspace scope is not trusted")
+            raise PermissionError("持久化 工作区 范围 不可信")
 
     @staticmethod
     def _turn_request(request: PipelineRequest) -> TurnRequest:
@@ -167,7 +165,7 @@ class DurableRunner:
 
 
 class DurableOnlyPipeline:
-    """Production pipeline without a legacy router, shadow path, or fallback."""
+    """不含 legacy Router、shadow 路径或 fallback 的生产 pipeline。"""
 
     def __init__(self, durable: Runner) -> None:
         self._durable = durable
@@ -175,7 +173,7 @@ class DurableOnlyPipeline:
     async def execute(self, request: PipelineRequest, observer: Observer | None) -> PipelineResult:
         result = await self._durable.execute(request, observer)
         if result.mode != "durable":
-            raise RuntimeError("durable-only runner returned an invalid mode")
+            raise RuntimeError("持久化-仅 运行器 返回了无效的 模式")
         return result
 
 

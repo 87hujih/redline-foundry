@@ -1,8 +1,8 @@
-"""Atomic canonical document commit boundary with idempotency checks."""
+"""带幂等校验的规范文档原子提交边界。"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from docreview.document.model import Document, rehash, validate
@@ -44,6 +44,8 @@ class CommitStore(Protocol):
         base_version_id: str,
         idempotency_key: str,
         patch_hash: str,
+        patch: PatchSet,
+        expected_hashes: dict[str, str],
         document: Document,
         actor_id: str,
     ) -> CommitResult: ...
@@ -61,6 +63,8 @@ async def commit(
     idempotency_key: str,
     actor_id: str,
     patch: PatchSet,
+    authorized_node_ids: frozenset[str] | None = None,
+    evidence_refs: frozenset[str] | None = None,
 ) -> CommitResult:
     if (
         not workspace_id.strip()
@@ -68,10 +72,10 @@ async def commit(
         or not idempotency_key.strip()
         or not actor_id.strip()
     ):
-        raise ValueError("workspace_id, resource_id, idempotency_key and actor_id are required")
+        raise ValueError("workspace_id, resource_id, idempotency_key 和 actor_id 为必填项")
     validate_set(patch)
     if patch.resource_id != resource_id:
-        raise CommitValidationError("PatchSet resource is outside trusted scope")
+        raise CommitValidationError("PatchSet 资源 超出 可信 范围")
     digest = patch_hash(patch)
     existing = await store.get_commit(workspace_id, idempotency_key)
     if existing is not None:
@@ -84,23 +88,29 @@ async def commit(
             False,
         )
     snapshot = await store.load_snapshot(workspace_id, resource_id)
+    if authorized_node_ids is not None or evidence_refs is not None:
+        snapshot = replace(
+            snapshot,
+            authorized_node_ids=(
+                snapshot.authorized_node_ids if authorized_node_ids is None else authorized_node_ids
+            ),
+            evidence_refs=snapshot.evidence_refs if evidence_refs is None else evidence_refs,
+        )
     if (
         snapshot.current_version_id != patch.base_version_id
         or snapshot.document.version_id != patch.base_version_id
     ):
-        raise CommitValidationError("base version conflict")
+        raise CommitValidationError("基础版本冲突")
     for operation in patch.operations:
         if operation.node_id not in snapshot.authorized_node_ids:
-            raise CommitValidationError(f"node {operation.node_id} is outside authorized scope")
+            raise CommitValidationError(f"节点{operation.node_id}超出 已授权 范围")
         if (
             operation.expected_parent_id
             and operation.expected_parent_id not in snapshot.authorized_node_ids
         ):
-            raise CommitValidationError(
-                f"parent {operation.expected_parent_id} is outside authorized scope"
-            )
+            raise CommitValidationError(f"父节点{operation.expected_parent_id}超出 已授权 范围")
     if any(ref not in snapshot.evidence_refs for ref in patch.evidence_refs):
-        raise CommitValidationError("evidence reference is missing")
+        raise CommitValidationError("证据 引用 缺失")
     try:
         document = apply_patch(snapshot.document, patch)
     except ValueError as error:
@@ -114,6 +124,10 @@ async def commit(
         base_version_id=patch.base_version_id,
         idempotency_key=idempotency_key,
         patch_hash=digest,
+        patch=patch,
+        expected_hashes={
+            operation.node_id: operation.expected_hash for operation in patch.operations
+        },
         document=document,
         actor_id=actor_id,
     )

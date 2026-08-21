@@ -1,4 +1,4 @@
-"""Lease-fenced transactional-outbox projection worker."""
+"""带 lease fencing 的 transactional-outbox Projection worker。"""
 
 from __future__ import annotations
 
@@ -98,7 +98,7 @@ class RuntimeProjector:
 
     async def project(self, event: Outbox) -> None:
         if event.event_type not in {"agent.step.outcome_committed", "agent.tool_approval.rejected"}:
-            raise ValueError(f"unsupported runtime projection event {event.event_type!r}")
+            raise ValueError(f"不支持的 运行时 投影 事件{event.event_type!r}")
         if await self.receipts.exists(event.id, PROJECTION_NAME):
             return
         snapshot = await self.reader.load(event)
@@ -107,7 +107,7 @@ class RuntimeProjector:
         if status == RunStatus.SUCCEEDED.value and snapshot.step_type == "RenderOutcome":
             content = str(snapshot.output.get("message", "")).strip()
             if not content:
-                raise ValueError("RenderOutcome projection requires a typed message")
+                raise ValueError("RenderOutcome 投影 需要 类型化 消息")
             message = {"role": "assistant", "kind": "text", "content": content}
         await self.committer.commit_projection_outcome(
             snapshot.turn_id,
@@ -131,7 +131,7 @@ class RuntimeProjector:
             "cancelled": RunStatus.CANCELLED.value,
         }
         if status not in mapping:
-            raise ValueError(f"invalid runtime run status {status!r}")
+            raise ValueError(f"无效的 运行时 运行 状态{status!r}")
         return mapping[status]
 
 
@@ -152,7 +152,7 @@ class ProjectionWorker:
             or config.retry_base <= timedelta(0)
             or config.retry_max < config.retry_base
         ):
-            raise ValueError("invalid projection worker configuration")
+            raise ValueError("无效的 投影 工作进程 配置")
         self.config = config
         self.store = store
         self.projector = projector

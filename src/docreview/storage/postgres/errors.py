@@ -1,4 +1,4 @@
-"""Stable repository errors mapped by HTTP adapters."""
+"""由 HTTP 适配器映射的稳定 repository 错误。"""
 
 
 class RecordNotFoundError(LookupError):

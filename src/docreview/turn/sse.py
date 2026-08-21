@@ -1,4 +1,4 @@
-"""Mapping from persisted Turn events to the frozen public SSE protocol."""
+"""将持久化 Turn 事件映射为冻结的公开 SSE 协议。"""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def event_frames(event: TurnEvent) -> tuple[SSEFrame, ...]:
 def render_frame(frame: SSEFrame) -> str:
     event_name = frame.event.strip()
     if not event_name or "\r" in event_name or "\n" in event_name or frame.id < 0:
-        raise ValueError("SSE event name or id is invalid")
+        raise ValueError("SSE 事件名称或 ID 无效")
     payload = _payload(cast(object, frame.data))
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return f"id: {frame.id}\nevent: {event_name}\ndata: {encoded}\n\n"

@@ -6,13 +6,15 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
-from docreview.api.dependencies import AppDependencies, CompatibilityScope
+from docreview.api.dependencies import AppDependencies
 from docreview.api.main import create_app
 from docreview.config.settings import load_settings
 from docreview.storage.models import AssistantMessage, AssistantSession
 from docreview.storage.postgres.errors import SessionNotFoundError
+from tests.trusted_identity import identity_adapter, signed_headers
 
 WORKSPACE_ID = "33333333-3333-4333-8333-333333333333"
+OTHER_WORKSPACE_ID = "44444444-4444-4444-8444-444444444444"
 SESSION_ID = "66666666-6666-4666-8666-666666666666"
 MESSAGE_ID = "99999999-9999-4999-8999-999999999999"
 NOW = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
@@ -41,9 +43,7 @@ class FakeAssistant:
 def app(repository: FakeAssistant | None):
     return create_app(
         load_settings({"CORS_ALLOWED_ORIGINS": "https://app.example.com"}),
-        dependencies=AppDependencies(
-            compatibility_scope=CompatibilityScope(WORKSPACE_ID), assistant=repository
-        ),
+        dependencies=AppDependencies(identity_adapter=identity_adapter(), assistant=repository),
     )
 
 
@@ -75,7 +75,8 @@ async def test_session_list_is_workspace_scoped_and_empty_array() -> None:
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app(repository)), base_url="http://test"
     ) as client:
-        response = await client.get("/api/assistant/sessions")
+        path = "/api/assistant/sessions"
+        response = await client.get(path, headers=signed_headers("GET", path, WORKSPACE_ID))
 
     assert response.status_code == 200
     assert response.json() == {"sessions": []}
@@ -88,7 +89,8 @@ async def test_session_detail_preserves_message_payload_object() -> None:
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app(repository)), base_url="http://test"
     ) as client:
-        response = await client.get(f"/api/assistant/sessions/{SESSION_ID}")
+        path = f"/api/assistant/sessions/{SESSION_ID}"
+        response = await client.get(path, headers=signed_headers("GET", path, WORKSPACE_ID))
 
     assert response.status_code == 200
     assert response.json() == {
@@ -120,10 +122,54 @@ async def test_session_uuid_and_missing_contract() -> None:
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app(repository)), base_url="http://test"
     ) as client:
-        invalid = await client.get("/api/assistant/sessions/not-a-uuid")
-        missing = await client.get(f"/api/assistant/sessions/{SESSION_ID}")
+        invalid_path = "/api/assistant/sessions/not-a-uuid"
+        missing_path = f"/api/assistant/sessions/{SESSION_ID}"
+        invalid = await client.get(
+            invalid_path, headers=signed_headers("GET", invalid_path, WORKSPACE_ID)
+        )
+        missing = await client.get(
+            missing_path, headers=signed_headers("GET", missing_path, WORKSPACE_ID)
+        )
 
     assert invalid.status_code == 400
     assert invalid.json() == {"error": "会话 ID 非法"}
     assert missing.status_code == 404
     assert missing.json() == {"error": "会话不存在"}
+
+
+@pytest.mark.anyio
+async def test_session_queries_require_trusted_identity_before_repository_access() -> None:
+    repository = FakeAssistant(sessions=[session()])
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(repository)), base_url="http://test"
+    ) as client:
+        response = await client.get("/api/assistant/sessions")
+
+    assert response.status_code == 401
+    assert response.json() == {"error": "durable identity is required"}
+    assert repository.calls == []
+
+
+@pytest.mark.anyio
+async def test_session_detail_does_not_reveal_another_workspace_object() -> None:
+    class WorkspaceAssistant(FakeAssistant):
+        async def get_conversation(
+            self, workspace_id: str, session_id: str
+        ) -> tuple[AssistantSession, list[AssistantMessage]]:
+            self.calls.append(("get", workspace_id, session_id))
+            if workspace_id != WORKSPACE_ID or self.session is None:
+                raise SessionNotFoundError
+            return self.session, self.messages
+
+    repository = WorkspaceAssistant(session=session())
+    path = f"/api/assistant/sessions/{SESSION_ID}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(repository)), base_url="http://test"
+    ) as client:
+        response = await client.get(
+            path, headers=signed_headers("GET", path, OTHER_WORKSPACE_ID)
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "会话不存在"}
+    assert repository.calls == [("get", OTHER_WORKSPACE_ID, SESSION_ID)]

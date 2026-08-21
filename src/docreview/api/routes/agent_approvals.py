@@ -1,4 +1,4 @@
-"""Authenticated public Approval query routes."""
+"""经过认证的公开 Approval 查询路由。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Bounded JSON decoding for untrusted model and resume payloads."""
+"""对不可信模型输出和恢复载荷执行有界 JSON 解码。"""
 
 from __future__ import annotations
 
@@ -18,13 +18,13 @@ def decode_unique_object(
 ) -> JSONObject:
     encoded = raw.encode() if isinstance(raw, str) else raw
     if not encoded or len(encoded) > max_bytes:
-        raise ValueError("JSON object is empty or exceeds byte limit")
+        raise ValueError("JSON 对象 为空 或 超出字节限制")
 
     def unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, value in pairs:
             if key in result:
-                raise ValueError(f"duplicate JSON key {key!r}")
+                raise ValueError(f"duplicate JSON key: {key!r}")
             result[key] = value
         return result
 
@@ -33,15 +33,15 @@ def decode_unique_object(
         decoder = json.JSONDecoder(object_pairs_hook=unique_pairs)
         value, end = decoder.raw_decode(text)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError("invalid JSON") from error
+        raise ValueError("JSON 无效") from error
     if text[end:].strip():
-        raise ValueError("JSON must contain exactly one value")
+        raise ValueError("JSON input must contain exactly one value")
     if not isinstance(value, dict):
-        raise ValueError("JSON value must be an object")
+        raise ValueError("JSON 值 必须是对象")
 
     def inspect(item: object, depth: int) -> None:
         if depth > max_depth:
-            raise ValueError("JSON exceeds depth limit")
+            raise ValueError("JSON 超出深度限制")
         if isinstance(item, dict):
             for child in cast(dict[object, object], item).values():
                 inspect(child, depth + 1)

@@ -1,4 +1,4 @@
-"""Workspace-scoped uploaded file metadata read adapter."""
+"""Workspace-scoped 上传文件元数据读取适配器。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Deterministic validation of model decisions into graph actions."""
+"""将模型决策确定性校验为 Graph 动作。"""
 
 from __future__ import annotations
 
@@ -31,15 +31,15 @@ _TOOL_ACTIONS: dict[ActionKind, tuple[str, str, NodeName]] = {
 
 def validate_action(state: GraphState, decision: Decision) -> Action:
     if state.goal is None:
-        raise ValueError("goal must be understood before deciding an action")
+        raise ValueError("决定操作前必须先理解目标")
     if decision.action in _TOOL_ACTIONS:
         tool_name, version, node = _TOOL_ACTIONS[decision.action]
         if decision.tool_name != tool_name:
-            raise ValueError(f"{decision.action} may only use {tool_name}")
+            raise ValueError(f"{decision.action}只能使用{tool_name}")
         if decision.action is ActionKind.REQUEST_APPROVAL and (
             state.patch_ref is None or not state.patch_ref.generated or not state.patch_ref.valid
         ):
-            raise ValueError("request_approval requires a deterministically validated patch")
+            raise ValueError("request_approval 需要经过确定性校验的补丁")
         return Action(
             kind=decision.action,
             next_node=node,
@@ -48,14 +48,14 @@ def validate_action(state: GraphState, decision: Decision) -> Action:
             tool_input=decision.tool_input,
         )
     if decision.tool_name or decision.tool_input:
-        raise ValueError(f"semantic action {decision.action} cannot call a tool")
+        raise ValueError(f"语义 操作{decision.action}不能调用 工具")
     if decision.action is ActionKind.ANALYZE:
         if not state.observations:
-            raise ValueError("analysis requires durable observations")
+            raise ValueError("分析操作需要持久化的观察结果")
         return Action(kind=decision.action, next_node=NodeName.ANALYZE_EVIDENCE)
     if decision.action is ActionKind.GENERATE_PATCH:
         if not state.finding_refs:
-            raise ValueError("patch generation requires typed finding references")
+            raise ValueError("生成补丁需要类型化的发现项引用")
         return Action(kind=decision.action, next_node=NodeName.GENERATE_PATCH)
     if decision.action is ActionKind.REQUEST_USER_INPUT:
         return Action(
@@ -65,7 +65,7 @@ def validate_action(state: GraphState, decision: Decision) -> Action:
         )
     if decision.action is ActionKind.FINISH:
         return Action(kind=decision.action, next_node=NodeName.RENDER_OUTCOME)
-    raise ValueError(f"unsupported action {decision.action}")
+    raise ValueError(f"不支持的 操作{decision.action}")
 
 
 __all__ = ["validate_action"]

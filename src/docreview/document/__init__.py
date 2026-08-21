@@ -1,4 +1,4 @@
-"""Canonical document ingestion and editing domain."""
+"""规范文档导入与编辑领域。"""
 
 from docreview.document.model import Document, Node, NodeType, stable_node_id
 

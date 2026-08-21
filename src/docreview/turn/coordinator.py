@@ -1,4 +1,4 @@
-"""Stateless coordinator for idempotent Turn acceptance and event replay."""
+"""无状态的幂等 Turn 接受与事件 replay coordinator。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ class TurnStore(Protocol):
 Observer = Callable[[TurnEvent], Awaitable[None]]
 
 
-def _go_json(value: object) -> str:
+def _canonical_json(value: object) -> str:
     encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return (
         encoded.replace("<", "\\u003c")
@@ -39,7 +39,7 @@ def _uuid(value: str, name: str, *, optional: bool = False) -> str:
     try:
         UUID(normalized)
     except ValueError as error:
-        raise ValueError(f"{name} must be a UUID") from error
+        raise ValueError(f"{name}必须是 UUID") from error
     return normalized
 
 
@@ -60,9 +60,9 @@ def prepare(request: TurnRequest) -> AcceptTurn:
     if not request.request_id or not request.message.strip():
         raise ValueError("request_id and message are required")
     if request.runtime_mode != "durable":
-        raise ValueError("only durable runtime mode is supported")
+        raise ValueError("仅支持持久化运行时模式")
     if request.principal_type not in {"user", "service"}:
-        raise ValueError("principal_type is invalid")
+        raise ValueError("principal_type 无效")
     for name, value, optional in (
         ("organization_id", request.organization_id, True),
         ("workspace_id", request.workspace_id, False),
@@ -72,9 +72,9 @@ def prepare(request: TurnRequest) -> AcceptTurn:
     ):
         _uuid(value, name, optional=optional)
     if not request.trust_source:
-        raise ValueError("durable request requires a trusted scope")
+        raise ValueError("持久化 请求 需要 可信 范围")
 
-    # Insertion order matches Go's frozen struct encoding and therefore its input hash.
+    # 插入顺序固定，从而保持 input hash 一致。
     payload: dict[str, object] = {"message": request.message}
     for key, value in (
         ("organization_id", request.organization_id),
@@ -88,7 +88,7 @@ def prepare(request: TurnRequest) -> AcceptTurn:
     ):
         if value:
             payload[key] = value
-    encoded = _go_json(payload)
+    encoded = _canonical_json(payload)
     digest = hashlib.sha256(encoded.encode()).hexdigest()
     return AcceptTurn(
         request=request,
@@ -100,7 +100,7 @@ def prepare(request: TurnRequest) -> AcceptTurn:
 
 
 class TurnCoordinator:
-    """Coordinates persisted facts; it owns no in-process Run state."""
+    """协调持久化事实；不持有进程内 Run 状态。"""
 
     def __init__(self, store: TurnStore) -> None:
         self._store = store
@@ -113,7 +113,7 @@ class TurnCoordinator:
 
     async def stream(self, request: TurnRequest, after_sequence: int, observer: Observer) -> None:
         if after_sequence < 0:
-            raise ValueError("after_sequence must be nonnegative")
+            raise ValueError("after_sequence 必须为非负数")
         result = await self.submit(request)
         for event in result.events:
             if event.sequence > after_sequence:

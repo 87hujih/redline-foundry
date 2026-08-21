@@ -1,4 +1,4 @@
-"""Authenticated public Run query routes."""
+"""经过认证的公开 Run 查询路由。"""
 
 from __future__ import annotations
 

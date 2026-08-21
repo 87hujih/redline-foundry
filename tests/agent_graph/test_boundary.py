@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import BaseModel
 
@@ -8,6 +10,8 @@ from docreview.agent_graph.models import (
     BudgetSnapshot,
     CommitResult,
     ContextResult,
+    ContextSnapshot,
+    DecisionResult,
     FindingReferencesResult,
     FindingsOutput,
     GeneratedPatchResult,
@@ -31,6 +35,16 @@ class Models:
 class Contexts:
     async def assemble(self, request: RuntimeRequest) -> ContextResult:
         return ContextResult(context_manifest_id="manifest-1")
+
+    async def load(self, manifest_id: str) -> ContextSnapshot:
+        assert manifest_id == "manifest-1"
+        return ContextSnapshot(
+            context_manifest_id=manifest_id,
+            run_id="run-1",
+            step_id="step-1",
+            items=({"layer": "control", "content": "typed actions only"},),
+            content_hash="sha256:" + "a" * 64,
+        )
 
 
 class Tools:
@@ -72,7 +86,7 @@ def request(operation: str = "decide_next_action") -> RuntimeRequest:
         node=NodeName.DECIDE_NEXT_ACTION,
         target=RuntimeTarget.MODEL_GATEWAY,
         operation=operation,
-        payload={},
+        payload={"context_manifest_id": "manifest-1"},
         idempotency_hint="key-1",
     )
 
@@ -88,6 +102,22 @@ async def test_model_gateway_output_is_decoded_strictly_before_resume() -> None:
     )
     with pytest.raises(ValueError, match="duplicate JSON key"):
         await boundary.dispatch(request())
+
+
+@pytest.mark.asyncio
+async def test_model_gateway_can_use_prior_step_manifest_from_same_run() -> None:
+    raw = (
+        '{"action":"finish","reason":"done","tool_input":{},'
+        '"expected_observation":"outcome","confidence":1}'
+    )
+    boundary = ProjectRuntimeBoundary(
+        Models(raw), Contexts(), Tools(), Commits(), Facts(), Budgets()
+    )
+
+    response = await boundary.dispatch(request().model_copy(update={"step_id": "step-2"}))
+
+    decoded = DecisionResult.model_validate_json(json.dumps(response.data))
+    assert decoded.decision.action == "finish"
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-"""Strict schemas for the bounded LangGraph orchestration boundary."""
+"""有界 LangGraph 编排边界的严格 schema。"""
 
 from __future__ import annotations
 
@@ -104,17 +104,23 @@ class Observation(StrictModel):
     novel: bool
 
 
+class EvidenceQuote(StrictModel):
+    evidence_id: Identifier
+    quote: ShortText
+
+
 class Finding(StrictModel):
     finding_id: Identifier
     summary: ShortText
     evidence_ids: tuple[Identifier, ...] = Field(min_length=1, max_length=100)
+    evidence_quotes: tuple[EvidenceQuote, ...] = Field(default=(), max_length=20)
     confidence: float = Field(ge=0, le=1)
 
     @field_validator("evidence_ids")
     @classmethod
     def unique_evidence(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if len(set(value)) != len(value):
-            raise ValueError("evidence_ids must be unique")
+            raise ValueError("evidence_ids 必须是 唯一")
         return value
 
 
@@ -148,7 +154,7 @@ class PatchOperation(StrictModel):
                     self.node,
                 )
             ):
-                raise ValueError("replace_node accepts only content")
+                raise ValueError("replace_node 接受 仅 内容")
         elif self.op in {PatchOperationKind.INSERT_BEFORE, PatchOperationKind.INSERT_AFTER}:
             if (
                 self.node is None
@@ -157,7 +163,7 @@ class PatchOperation(StrictModel):
                 or self.content is not None
                 or self.attributes is not None
             ):
-                raise ValueError("insert operation requires only node and parent binding")
+                raise ValueError("写入 操作 仅需要 节点 和 父节点 绑定")
         elif self.op is PatchOperationKind.UPDATE_ATTRIBUTES:
             if self.attributes is None or any(
                 value is not None
@@ -168,7 +174,7 @@ class PatchOperation(StrictModel):
                     self.node,
                 )
             ):
-                raise ValueError("update_attributes accepts only attributes")
+                raise ValueError("update_attributes 接受 仅接受属性")
         elif any(
             value is not None
             for value in (
@@ -179,7 +185,7 @@ class PatchOperation(StrictModel):
                 self.node,
             )
         ):
-            raise ValueError("delete_node accepts no payload")
+            raise ValueError("delete_node 接受 不接受载荷")
         return self
 
 
@@ -195,7 +201,7 @@ class Patch(StrictModel):
     @classmethod
     def unique_evidence(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if len(set(value)) != len(value):
-            raise ValueError("evidence_refs must be unique")
+            raise ValueError("evidence_refs 必须是 唯一")
         return value
 
 
@@ -316,6 +322,7 @@ class GraphState(StrictModel):
 class RuntimeRequest(StrictModel):
     request_id: Identifier
     run_id: Identifier
+    step_id: Identifier | None = None
     node: NodeName
     target: RuntimeTarget
     operation: Identifier
@@ -345,6 +352,14 @@ class ContextResult(StrictModel):
     context_manifest_id: Identifier
 
 
+class ContextSnapshot(StrictModel):
+    context_manifest_id: Identifier
+    run_id: Identifier
+    step_id: Identifier
+    items: tuple[JSONObject, ...] = Field(max_length=1_000)
+    content_hash: Hash
+
+
 class DecisionResult(StrictModel):
     decision: Decision
 
@@ -365,7 +380,7 @@ class FindingReferencesResult(StrictModel):
     @classmethod
     def unique_findings(cls, value: tuple[FindingRef, ...]) -> tuple[FindingRef, ...]:
         if len({item.finding_id for item in value}) != len(value):
-            raise ValueError("finding references must be unique")
+            raise ValueError("发现项 引用 必须是 唯一")
         return value
 
 
@@ -422,6 +437,7 @@ __all__ = [
     "CommitRef",
     "CommitResult",
     "ContextResult",
+    "ContextSnapshot",
     "Decision",
     "DecisionResult",
     "Finding",

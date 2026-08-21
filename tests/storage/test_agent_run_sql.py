@@ -57,7 +57,7 @@ def test_public_run_queries_do_not_select_sensitive_runtime_payloads() -> None:
         assert forbidden not in sql
 
 
-def test_public_findings_have_go_compatible_stable_ordering() -> None:
+def test_public_findings_have_stable_ordering() -> None:
     sql = normalized(PUBLIC_RUN_FINDINGS_SQL)
 
     assert "order by finding_group, fact_created_at, fact_id" in sql
